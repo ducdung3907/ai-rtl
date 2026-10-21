@@ -1,3 +1,4 @@
+// skew will delay the arithmetic of later pe => make the arithmetic true pair
 module skew #(
     parameter N = 4
 )(  
