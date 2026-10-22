@@ -21,19 +21,22 @@ generate
         logic [i-1:0][7:0] dcache;
         logic [i-1:0] vcache,scache;
         always_ff @(posedge clk or negedge rst_n) begin
-            dcache[0] <= data_in[i];
-            vcache[0] <= valid_in;
-            scache[0] <= start_in;
             if (!rst_n) begin
                 vcache <= '0;
                 scache <= '0;
             end else begin
-                integer j;
-                for (j=0; j<i; j=j+1) begin
-                    dcache[j+1] <= dcache[j];
+                vcache[0] <= valid_in;
+                scache[0] <= start_in;
+                for (int j=0; j<i-1; j=j+1) begin
                     vcache[j+1] <= vcache[j];
                     scache[j+1] <= scache[j];
                 end
+            end
+        end
+        always_ff @(posedge clk) begin         
+            dcache[0] <= data_in[i];
+            for (int j = 0; j < i-1; j = j+1) begin
+                dcache[j+1] <= dcache[j];
             end
         end
         assign data_out[i] = dcache [i-1];
