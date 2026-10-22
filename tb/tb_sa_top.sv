@@ -17,6 +17,14 @@
 //   4. Random:       random K (1 .. K_MAX), sometimes with bubbles
 //   After every test the results are also checked again after a few idle cycles (hold).
 //
+// done checks (every test):
+//   - last is driven with the final column of each matrix
+//   - the testbench waits for done (timeout if it never comes)
+//   - done must rise exactly 2N-1 cycles after the last column
+//   - every result must be correct while done = 1
+//   - done must be a single-cycle pulse, once per matrix
+//   - done must stay 0 during and after reset, and for a last sent during a bubble
+//
 // Run:
 //   iverilog -g2012 -o sim.vvp rtl/mac8.sv rtl/pe8.sv rtl/systolic_array.sv \
 //            rtl/skew.sv rtl/complete_sa.sv tb/tb_complete_sa.sv && vvp sim.vvp
@@ -35,7 +43,8 @@ module tb_complete_sa;
     logic clk = 0, rst_n = 0;
 
     logic [N-1:0][7:0] a_col = '0, b_row = '0;
-    logic              valid = 0, start = 0;
+    logic              valid = 0, start = 0, last = 0;
+    logic              done;
 
     logic [N*N*32-1:0] acc_flat;   // all N*N results; matches [N-1:0][N-1:0][31:0]
 
@@ -49,6 +58,8 @@ module tb_complete_sa;
         .b_row (b_row),
         .valid (valid),
         .start (start),
+        .last  (last),
+        .done  (done),
         .acc   (acc_flat)
     );
 
@@ -73,6 +84,14 @@ module tb_complete_sa;
     int errors  = 0;
     int tests   = 0;
     int bubbles = 0;
+
+    // done bookkeeping
+    int cycle_count  = 0;   // free-running cycle counter
+    int last_cycle   = 0;   // cycle on which the last column was fed
+    int done_count   = 0;   // done pulses seen in the current test
+    int done_cycle   = -1;  // cycle on which done was seen
+
+    always @(posedge clk) cycle_count++;   // rising edge: stable when the test reads it on falling edges
     int i, j, k;                     // declared once, assigned in loops (Icarus quirk)
 
     task automatic compute_expected();
@@ -118,6 +137,7 @@ module tb_complete_sa;
                 end
                 valid = 0;
                 start = 0;
+                last  = ($urandom_range(0, 3) == 0);   // stray last during a bubble: must be ignored
                 bubbles++;
             end
 
@@ -126,11 +146,13 @@ module tb_complete_sa;
             for (j = 0; j < N; j++) b_row[j] = B[k][j];
             valid = 1;
             start = (k == 0) || (K2_START > 0 && k == K2_START);
+            last  = (k == K - 1);
+            if (k == K - 1) last_cycle = cycle_count;
         end
 
         // back to idle
         @(negedge clk);
-        a_col = '0; b_row = '0; valid = 0; start = 0;
+        a_col = '0; b_row = '0; valid = 0; start = 0; last = 0;
     endtask
 
     task automatic compare(input string label);
@@ -149,15 +171,38 @@ module tb_complete_sa;
     // ------------------------------------------------------------------
     task automatic run_test(input string label);
         compute_expected();
+        done_count = 0;
+        done_cycle = -1;
         feed_matrices();
 
-        // The last column needs N-1 cycles in the skew, N-1 more inside the array
-        // to reach PE(N-1,N-1), and 1 to accumulate. Wait a little extra.
-        repeat (2*N + 1) @(negedge clk);
-        compare(label);
+        // Wait for done (sampled on falling edges), with a timeout
+        for (int w = 0; w < 4*N + 8 && done_count == 0; w++) begin
+            if (done === 1'b1) begin
+                done_count++;
+                done_cycle = cycle_count;
+                compare({label, " (at done)"});
+            end
+            if (done_count == 0) @(negedge clk);
+        end
 
-        // With inputs idle, results must hold
-        repeat (3) @(negedge clk);
+        if (done_count == 0) begin
+            errors++;
+            if (errors <= 10) $display("FAIL [%s] done never came", label);
+        end else if (done_cycle - last_cycle != 2*N - 1) begin
+            errors++;
+            if (errors <= 10)
+                $display("FAIL [%s] done came %0d cycles after the last column, expected %0d",
+                         label, done_cycle - last_cycle, 2*N - 1);
+        end
+
+        // done must be a single-cycle pulse, and results must hold afterwards
+        repeat (3) begin
+            @(negedge clk);
+            if (done !== 1'b0) begin
+                errors++;
+                if (errors <= 10) $display("FAIL [%s] done stayed high / pulsed again", label);
+            end
+        end
         compare({label, " (hold)"});
 
         tests++;
@@ -176,8 +221,18 @@ module tb_complete_sa;
         K2_START   = 0;
         BUBBLE_PCT = 0;
 
-        // Reset
-        #12 rst_n = 1;
+        // Reset: done must be 0 while in reset, even with last & valid driven
+        last = 1; valid = 1;
+        #8;
+        if (done !== 1'b0) begin errors++; $display("FAIL [reset] done = %b during reset", done); end
+        #4 rst_n = 1;
+        last = 0; valid = 0;
+
+        // After reset, done must stay 0 with no input
+        repeat (4*N) begin
+            @(negedge clk);
+            if (done !== 1'b0) begin errors++; $display("FAIL [after reset] done = %b with no last", done); end
+        end
 
         // --- 1. Directed tests ------------------------------------------
 
@@ -236,7 +291,7 @@ module tb_complete_sa;
         end
 
         // --- Summary ----------------------------------------------------
-        if (errors == 0) $display("PASS: all %0d matrix multiplications correct (N = %0d, %0d bubble cycles)",
+        if (errors == 0) $display("PASS: all %0d matrix multiplications correct, done exact every time (N = %0d, %0d bubble cycles)",
                                   tests, N, bubbles);
         else             $display("FAIL: %0d wrong results in %0d tests (N = %0d)", errors, tests, N);
         $finish;
