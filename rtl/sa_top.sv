@@ -6,6 +6,8 @@ module complete_sa #(
     input logic [N-1:0][7:0] a_col, b_row,
     input logic valid,
     input logic start,
+    input logic last,
+    output logic done,
     output logic [N-1:0][N-1:0][31:0] acc
 );
 
@@ -28,10 +30,10 @@ skew #(.N(N)) row (
     .rst_n(rst_n),
     .data_in(b_row),
     .valid_in(valid),
-    .start_in(start),
+    .start_in(1'b0),
     .data_out(b_delay),
     .valid_out(b_valid),
-    .start_out(b_start)
+    .start_out()
 );
 
 systolic_array #(.N(N)) base_sa (
@@ -44,5 +46,20 @@ systolic_array #(.N(N)) base_sa (
     .b_valid_in(b_valid),
     .acc(acc)
 );
+
+logic [2*N-2:0] done_cache;
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        done_cache <= '0;
+    end else begin
+        done_cache[0] <= (last&valid);
+        for (int i=0;i<2*N-2;i++) begin
+            done_cache[i+1]<= done_cache[i];
+        end
+    end
+end
+
+assign done = done_cache[2*N-2];
 
 endmodule
