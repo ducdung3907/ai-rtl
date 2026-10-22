@@ -1,0 +1,34 @@
+# ---- Simulation outputs (Icarus Verilog) ----
+*.vvp
+a.out
+*_sim
+build/
+
+# ---- Waveforms ----
+*.vcd
+*.fst
+*.ghw
+*.gtkw.bak
+
+# ---- Synthesis outputs (Yosys / sv2v, later) ----
+*.json
+*.blif
+synth/
+*_sv2v.v
+
+# ---- Logs ----
+*.log
+
+# ---- Python (reference models) ----
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+model/vectors/          
+
+# ---- Editors / OS ----
+.vscode/
+*.code-workspace
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
