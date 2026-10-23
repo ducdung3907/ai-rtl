@@ -2,7 +2,7 @@
 
 A parameterised **N×N output-stationary systolic array** in SystemVerilog that computes **C = A × B** on signed 8-bit inputs with 32-bit accumulators, the core operation of neural-network accelerators such as Google's TPU.
 
-You feed plain matrices one column of A and one row of B per cycle; the hardware skews the inputs, streams them through N² multiply-accumulate units, and raises `done` the cycle the result is ready. Verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices.
+You feed plain matrices one column of A and one row of B per cycle; the hardware skews the inputs, streams them through N² multiply-accumulate units, and raises `done` the cycle the result is ready. Verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices, and synthesised for FPGAs up to N = 16 (256 PEs, 114 MHz, 58 GOPS peak on an AMD Artix-7).
 
 ## Block diagram
 
@@ -138,7 +138,58 @@ vvp sim.vvp +seed=42
 
 ## Synthesis results
 
-The design was synthesised with open-source tools for a **Lattice ECP5 LFE5U-85F** FPGA (83,640 LUTs, 156 hardware 18×18 multipliers): SystemVerilog is converted to Verilog with sv2v, synthesised with Yosys and placed and routed with nextpnr, which reports the maximum clock frequency.
+The same RTL was synthesised, placed and routed for two FPGAs with two toolflows: **AMD Artix-7** with **Vivado**, and **Lattice ECP5** with the open-source **sv2v + Yosys + nextpnr** flow. Both report area after place and route and the maximum clock frequency from static timing analysis.
+
+| N | PEs | Artix-7 LUTs | Artix-7 max clock | ECP5 max clock | Artix-7 peak throughput |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 4 | 530 | 128 MHz | 85.7 MHz | 1.0 GOPS |
+| 4 | 16 | 2,098 | 122 MHz | 80.2 MHz | 3.9 GOPS |
+| 8 | 64 | 8,424 | 121 MHz | 63.5 MHz | 15.5 GOPS |
+| 12 | 144 | 18,821 | 117 MHz | – | 33.7 GOPS |
+| 16 | 256 | 33,371 | 114 MHz | does not fit | 58.3 GOPS |
+
+*Peak throughput: 2 operations (multiply + add) per PE per cycle at the maximum clock.*
+
+### AMD Artix-7 (Vivado)
+
+Target: **XC7A100T-1CSG324** (63,400 LUTs, 126,800 flip-flops, 240 DSP48E1 slices), the FPGA on the Nexys A7-100T and Arty A7-100T boards. `complete_sa` was synthesised out of context (`-mode out_of_context`, so its ports need no FPGA pins) with Vivado's default synthesis and implementation strategies and a 5 ns clock constraint ([`synth/timing.xdc`](synth/timing.xdc)); the maximum clock is 1 / (5 ns − WNS).
+
+| N | PEs | LUTs | % of chip | LUTRAM | Flip-flops | DSPs | WNS at 5 ns | Max clock | Power (est.) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 4 | 530 | 0.8% | 0 | 185 | 0 | −2.798 ns | 128 MHz | – |
+| 4 | 16 | 2,098 | 3.3% | 0 | 820 | 0 | −3.205 ns | 122 MHz | – |
+| 8 | 64 | 8,424 | 13% | 32 | 3,265 | 0 | −3.288 ns | 121 MHz | 0.36 W |
+| 12 | 144 | 18,821 | 30% | 64 | 7,328 | 0 | −3.544 ns | 117 MHz | 0.71 W |
+| 16 | 256 | 33,371 | 53% | 96 | 13,069 | 0 | −3.781 ns | 114 MHz | 1.16 W |
+
+*Vivado 2026.1. With its default settings Vivado builds the 8×8 multipliers from LUTs and carry chains rather than DSP48 slices. Power is Vivado's vectorless estimate at the 200 MHz constraint (medium confidence), not a measurement.*
+
+- **Area scales linearly with the number of PEs:** about 125 LUTs per PE from N = 2 to N = 16, so the size of any array can be predicted before synthesis. The flip-flop counts match Yosys' technology-independent count (183 vs 183 at N = 2 with a relaxed 10 ns constraint, 820 vs 819 at N = 4); the tight 5 ns constraint makes Vivado duplicate a few registers for timing.
+- **The clock barely drops as the array grows:** 128 → 114 MHz (−11%) while the array grows 64×, so throughput scales almost linearly to 58 GOPS. Every PE only connects to its neighbours, so a bigger array does not create longer wires inside the array, and LUT-based multipliers can sit right next to their PE.
+- **The critical path is the single-cycle MAC.** At N = 16 the worst path starts at PE(7,11)'s `b` forwarding register and ends at bit 30 of PE(8,11)'s accumulator: one PE hop, the multiplier and the 32-bit accumulator adder in one clock cycle. The high accumulator bits are last because the carry ripples up the adder.
+- **Unreset delay lines become LUT shift registers.** From N = 8, Vivado packs the longer skew lanes into SRL shift registers (one LUT replaces a chain of flip-flops), which is why LUTRAM appears and the flip-flop count falls below Yosys' (3,265 vs 3,435 at N = 8). This is only possible because the skew data registers have no reset; the valid and start bits keep their reset and stay flip-flops.
+- **Logic is optimised across module boundaries.** Vivado reports some LUTs under the `skew` instances; the netlist shows these are partial-product logic of the multipliers in the first PE column, placed next to the skew registers that feed them. Totals are unaffected.
+
+**LUT vs DSP multipliers (N = 2).** Adding `(* use_dsp = "yes" *)` to `mac8` moves the arithmetic into DSP48E1 slices:
+
+| N = 2 | LUTs | Flip-flops | DSPs | Max clock |
+| --- | --- | --- | --- | --- |
+| LUT multipliers (default) | 530 | 185 | 0 | 128 MHz |
+| DSP multipliers (`use_dsp`) | 202 | 59 | 8 | 119 MHz |
+
+The DSP version uses 62% fewer LUTs and 68% fewer flip-flops (the accumulators move into the DSPs' output registers) but is not faster, and it uses two DSPs per PE (multiply and accumulate separately). With a single-cycle MAC the DSPs' internal pipeline registers cannot be used, so the path runs through two DSP blocks in one cycle. A pipelined MAC that fits in one DSP per PE is the obvious next step.
+
+**Size limit.** With LUT multipliers the XC7A100T fits up to roughly N = 18–20 before routing becomes difficult (N = 32 would need about twice the chip's LUTs). With one DSP per PE the 240 DSP slices allow N = 15; combining DSP and LUT PEs, or a larger device, would go further.
+
+Elaborated RTL schematic of `complete_sa` (N = 2) and the placed N = 16 design on the chip:
+
+![Vivado RTL schematic, N = 2](docs/vivado_rtl_schematic_N2.png)
+
+![Placed design on the XC7A100T, N = 16](docs/vivado_device_N16.png)
+
+### Lattice ECP5 (open-source flow)
+
+Target: **Lattice ECP5 LFE5U-85F** (83,640 LUTs, 156 hardware 18×18 multipliers). SystemVerilog is converted to Verilog with sv2v, synthesised with Yosys and placed and routed with nextpnr.
 
 | N | PEs | Generic gates | Flip-flops | ECP5 LUTs | ECP5 FFs | Multipliers | Max clock | Peak throughput |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -146,16 +197,12 @@ The design was synthesised with open-source tools for a **Lattice ECP5 LFE5U-85F
 | 4 | 16 | 13,284 | 819 | 1,975 | 941 | 16 | 80.2 MHz | 2.6 GOPS |
 | 8 | 64 | 53,291 | 3,435 | 8,172 | 3,361 | 64 | 63.5 MHz | 8.1 GOPS |
 
-*Generic gates and flip-flops: `complete_sa` alone, technology-independent (Yosys `synth`). ECP5 columns: after place and route, including the small measurement harness. Peak throughput: 2 operations (multiply + add) per PE per cycle at the maximum clock. Tools: Yosys 0.33, nextpnr-ecp5 0.6, sv2v 0.0.12; other versions give slightly different numbers.*
+*Generic gates and flip-flops: `complete_sa` alone, technology-independent (Yosys `synth`). ECP5 columns: after place and route, including the small measurement harness. Tools: Yosys 0.33, nextpnr-ecp5 0.6, sv2v 0.0.12; other versions give slightly different numbers.*
 
-**What the numbers show**
-
-- **Area grows linearly with the number of PEs (N²).** Each PE costs about 830 generic gates, 125 ECP5 LUTs and one hardware multiplier, so doubling N quadruples the area. The flip-flop count matches the design: about 51 per PE (32-bit accumulator, 8-bit `a` and `b` forwarding registers, and their valid and clear bits) plus the skew and `done` delay lines.
-- **The multipliers set the size limit on this FPGA.** Each PE uses one of the 156 hardware multipliers, so the largest square array that fits is N = 12 (144 multipliers); N = 16 (256) does not fit. Larger arrays would have to build multipliers out of LUTs (Yosys `synth_ecp5 -nodsp`), and real accelerators reuse a smaller array over tiles of a large matrix instead.
-- **The critical path is the single-cycle MAC.** At every size, the slowest path runs from a PE input register through the hardware multiplier and the 32-bit accumulator adder into `acc`, as expected for a multiply and an add in the same cycle.
-- **The clock slows as N grows** (86 → 64 MHz), even though each PE is identical. A larger array spreads across more of the chip and the multipliers sit in fixed columns, so the wires between registers and multipliers get longer.
-
-The clear next optimisation is a register between the multiplier and the adder (a two-stage MAC), which splits the critical path in two.
+- **Area grows linearly with the number of PEs:** about 830 generic gates, 125 ECP5 LUTs and one hardware multiplier per PE.
+- **The hardware multipliers set the size limit:** with 156 of them, N = 12 (144) is the largest square array that fits; N = 16 does not.
+- **The critical path is the single-cycle MAC:** PE input register → hardware multiplier → 32-bit adder → `acc`.
+- **The clock falls faster than on Artix-7** (86 → 64 MHz from N = 2 to 8). Every PE must use a hard multiplier in a fixed column, so in larger arrays more PEs end up far from their multiplier and the wires get longer.
 
 **Measurement harness.** The array has 2N×8 input and N²×32 output bits (2,048 at N = 8), far more than the FPGA's pins, and synthesis deletes any logic whose output is unused. [`synth/synth_wrap.sv`](synth/synth_wrap.sv) therefore loads the inputs from a one-pin shift register and XOR-folds all results into one 32-bit output over two register stages, so every PE is kept and the harness never limits the clock.
 
@@ -168,30 +215,38 @@ The clear next optimisation is a register between the multiplier and the adder (
 
 Requires [sv2v](https://github.com/zachjs/sv2v), [Yosys](https://github.com/YosysHQ/yosys) and [nextpnr-ecp5](https://github.com/YosysHQ/nextpnr), all available in [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build).
 
+### Cross-tool findings
+
+- **Same RTL, different results:** at N = 8 the Artix-7 with Vivado runs 1.9× faster than the ECP5 with the open-source flow, and the gap widens with N.
+- **Hard multipliers are not automatically better.** On the ECP5 the fixed multiplier columns limit both size and clock; on the Artix-7, LUT multipliers scale further and hold the clock better, while DSP multipliers save area but need a pipelined MAC to also save time.
+- **Both flows agree on the design itself:** flip-flop counts match, and both identify the single-cycle MAC as the critical path.
+
 ## Repository layout
 
 ```
 rtl/      design files
 tb/       self-checking testbenches
-synth/    synthesis script, measurement harness and results (synth/build/ is ignored)
+synth/    synthesis: Yosys/nextpnr script, measurement harness, results, Vivado timing constraint
+docs/     figures (Vivado schematic and placed design)
 ```
 
 ## Limitations and next steps
 
 - **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. Next step: copy results to an output buffer on `done` (double buffering).
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
-- **Single-cycle MAC.** Multiply and add in the same cycle is the critical path at every size (see synthesis results). Next step: a two-stage MAC, then re-measure the maximum clock.
+- **Single-cycle MAC.** Multiply and add in the same cycle is the critical path at every size on both FPGAs. Next step: a two-stage MAC that fits in one DSP48 per PE, then re-measure area and maximum clock against the tables above.
 - **Capstone:** run an int8-quantised MNIST layer from PyTorch on the array in simulation and compare against the PyTorch result.
 
 ## AI use
 
 - **Design (RTL):** all design files in `rtl/` were written by me. Claude reviewed them, explained concepts and pointed out bugs, which I then fixed.
 - **Testbenches:** `tb/tb_mac.sv` was written by me. The other testbenches were generated by Claude and run against my designs.
-- **Synthesis:** the synthesis script and measurement harness in `synth/` were written by Claude.
+- **Synthesis:** the Yosys/nextpnr script and measurement harness in `synth/` were written by Claude. The Vivado runs were set up and run by me in the Vivado GUI.
 - **Documentation:** this README was drafted with Claude.
 
 ## Tools
 
 - SystemVerilog (IEEE 1800-2012)
 - Icarus Verilog 12 for simulation
-- sv2v, Yosys and nextpnr for synthesis and place and route
+- sv2v, Yosys and nextpnr for open-source synthesis and place and route (Lattice ECP5)
+- AMD Vivado 2026.1 for synthesis and implementation (Artix-7)
