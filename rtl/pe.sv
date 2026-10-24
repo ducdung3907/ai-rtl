@@ -26,15 +26,14 @@ mac8 mac (
 );
 
 always_ff @(posedge clk or negedge rst_n) begin
+    a_out <= a_in;
+    b_out <= b_in;
+
     if (!rst_n) begin
-           a_out       <= '0;
-           b_out       <= '0;
            clear_out   <= 1'b0;
            a_valid_out <= 1'b0;
            b_valid_out <= 1'b0;
        end else begin
-           a_out       <= a_in;
-           b_out       <= b_in;
            clear_out   <= clear_in;
            a_valid_out <= a_valid_in;
            b_valid_out <= b_valid_in;

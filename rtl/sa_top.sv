@@ -47,19 +47,19 @@ systolic_array #(.N(N)) base_sa (
     .acc(acc)
 );
 
-logic [2*N-2:0] done_cache;
+logic [2*N-1:0] done_cache;
 
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         done_cache <= '0;
     end else begin
         done_cache[0] <= (last&valid);
-        for (int i=0;i<2*N-2;i++) begin
+        for (int i=0;i<2*N-1;i++) begin
             done_cache[i+1]<= done_cache[i];
         end
     end
 end
 
-assign done = done_cache[2*N-2];
+assign done = done_cache[2*N-1];
 
 endmodule
