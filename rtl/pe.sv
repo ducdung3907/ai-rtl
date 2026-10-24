@@ -18,7 +18,7 @@ module pe8 #(
 );
 
 generate
-    if (MAC_LAT == 1) begin
+    if (MAC_LAT == 1) begin : g_mac
         mac8 mac (
         .clk(clk),
         .rst_n(rst_n),
@@ -27,7 +27,7 @@ generate
         .a(a_in),
         .b(b_in),
         .acc(acc));
-    end else if (MAC_LAT == 2) begin
+    end else if (MAC_LAT == 2) begin : g_mac
         mac8_pipe mac (
         .clk(clk),
         .rst_n(rst_n),
