@@ -18,6 +18,7 @@ module tb_pe8;
     // Signals
     // ------------------------------------------------------------------
     logic clk = 0, rst_n = 0;
+    parameter int MAC_LAT = 2;
 
     logic signed [7:0]  a_in = 0, b_in = 0;
     logic               a_valid_in = 0, b_valid_in = 0, clear_in = 0;

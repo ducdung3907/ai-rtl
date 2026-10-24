@@ -36,6 +36,7 @@ module tb_complete_sa;
     parameter int N            = 4;    // array size
     parameter int K_MAX        = 16;   // longest inner dimension tested
     parameter int RANDOM_TESTS = 500;
+    parameter int MAC_LAT      = 2;
 
     // ------------------------------------------------------------------
     // Signals
