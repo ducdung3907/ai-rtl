@@ -1,0 +1,4 @@
+mac_lat,N,PEs,generic_cells,generic_ffs,ecp5_luts,ecp5_ffs,ecp5_mult18,fmax_mhz
+1,2,4,3321,183,375,265,4,96.33
+1,4,16,13469,819,1259,761,16,82.85
+1,8,64,53675,3435,5235,2521,64,61.46

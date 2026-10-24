@@ -189,11 +189,11 @@ module tb_complete_sa;
         if (done_count == 0) begin
             errors++;
             if (errors <= 10) $display("FAIL [%s] done never came", label);
-        end else if (done_cycle - last_cycle != 2*N - 1) begin
+        end else if (done_cycle - last_cycle != 2*(N-1) + MAC_LAT) begin
             errors++;
             if (errors <= 10)
                 $display("FAIL [%s] done came %0d cycles after the last column, expected %0d",
-                         label, done_cycle - last_cycle, 2*N - 1);
+                         label, done_cycle - last_cycle, 2*(N-1) + MAC_LAT);
         end
 
         // done must be a single-cycle pulse, and results must hold afterwards
