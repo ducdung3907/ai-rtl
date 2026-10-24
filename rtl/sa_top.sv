@@ -37,7 +37,7 @@ skew #(.N(N)) row (
     .start_out()
 );
 
-systolic_array #(.N(N)) base_sa (
+systolic_array #(.N(N),.MAC_LAT(MAC_LAT)) base_sa (
     .clk(clk),
     .rst_n(rst_n),
     .a_in(a_delay),
