@@ -37,7 +37,7 @@ generate
         .b(b_in),
         .acc(acc));
     end else begin
-        $fatal(1, "MAC_LAT must be 1 or 2, got %0d", MAC_LAT);;
+        $fatal(1, "MAC_LAT must be 1 or 2, got %0d", MAC_LAT);
     end
 endgenerate
 

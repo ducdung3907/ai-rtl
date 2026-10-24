@@ -51,7 +51,7 @@ module tb_complete_sa;
     // ------------------------------------------------------------------
     // DUT and clock
     // ------------------------------------------------------------------
-    complete_sa #(.N(N)) dut (
+    complete_sa #(.N(N),.MAC_LAT(MAC_LAT)) dut (
         .clk   (clk),
         .rst_n (rst_n),
         .a_col (a_col),
