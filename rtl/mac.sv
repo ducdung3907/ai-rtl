@@ -1,3 +1,4 @@
+/*
 module mac8 (
     input logic clk,
     input logic rst_n,
@@ -33,3 +34,4 @@ module mac8 (
     end
 
 endmodule
+*/
