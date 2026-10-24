@@ -1,5 +1,6 @@
 module systolic_array #(
-    parameter N = 4
+    parameter N = 4,
+    parameter int MAC_LAT = 2
 )(
     input logic clk,
     input logic rst_n,
@@ -27,7 +28,9 @@ generate
         assign w_av[i][0]  = a_valid_in[i];
         assign w_clr[i][0] = clear_in[i];
         for (j = 0; j<N; j= j+1) begin :col
-            pe8 pe (
+            pe8 #(
+                .MAC_LAT(MAC_LAT)
+            ) pe (
             .clk(clk),
             .rst_n(rst_n),
             .a_valid_in(w_av[i][j]),
