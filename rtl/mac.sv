@@ -34,6 +34,7 @@ module mac8 (
 
 endmodule
 
+(* use_dsp = "yes" *)
 module mac8_pipe (
     input logic clk,
     input logic rst_n,
