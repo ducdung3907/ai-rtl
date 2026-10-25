@@ -36,6 +36,7 @@ module tb_complete_sa;
     parameter int N            = 4;    // array size
     parameter int K_MAX        = 16;   // longest inner dimension tested
     parameter int RANDOM_TESTS = 500;
+    parameter int MAC_LAT      = 2;
 
     // ------------------------------------------------------------------
     // Signals
@@ -51,7 +52,7 @@ module tb_complete_sa;
     // ------------------------------------------------------------------
     // DUT and clock
     // ------------------------------------------------------------------
-    complete_sa #(.N(N)) dut (
+    complete_sa #(.N(N),.MAC_LAT(MAC_LAT)) dut (
         .clk   (clk),
         .rst_n (rst_n),
         .a_col (a_col),
@@ -188,11 +189,11 @@ module tb_complete_sa;
         if (done_count == 0) begin
             errors++;
             if (errors <= 10) $display("FAIL [%s] done never came", label);
-        end else if (done_cycle - last_cycle != 2*N - 1) begin
+        end else if (done_cycle - last_cycle != 2*(N-1) + MAC_LAT) begin
             errors++;
             if (errors <= 10)
                 $display("FAIL [%s] done came %0d cycles after the last column, expected %0d",
-                         label, done_cycle - last_cycle, 2*N - 1);
+                         label, done_cycle - last_cycle, 2*(N-1) + MAC_LAT);
         end
 
         // done must be a single-cycle pulse, and results must hold afterwards

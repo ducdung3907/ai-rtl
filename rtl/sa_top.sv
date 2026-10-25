@@ -1,5 +1,6 @@
 module complete_sa #(
-    parameter N = 4
+    parameter N = 4,
+    parameter int MAC_LAT = 2
 )(
     input logic clk,
     input logic rst_n,
@@ -12,7 +13,7 @@ module complete_sa #(
 );
 
 logic [N-1:0][7:0] a_delay, b_delay;
-logic [N-1:0] a_valid, b_valid, a_start, b_start;
+logic [N-1:0] a_valid, b_valid, a_start;
 
 skew #(.N(N)) col (
     .clk(clk),
@@ -36,7 +37,7 @@ skew #(.N(N)) row (
     .start_out()
 );
 
-systolic_array #(.N(N)) base_sa (
+systolic_array #(.N(N),.MAC_LAT(MAC_LAT)) base_sa (
     .clk(clk),
     .rst_n(rst_n),
     .a_in(a_delay),
@@ -47,19 +48,21 @@ systolic_array #(.N(N)) base_sa (
     .acc(acc)
 );
 
-logic [2*N-1:0] done_cache;
+localparam int LAT = 2*(N-1) + MAC_LAT; 
+
+logic [LAT-1:0] done_cache;
 
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         done_cache <= '0;
     end else begin
         done_cache[0] <= (last&valid);
-        for (int i=0;i<2*N-1;i++) begin
+        for (int i=0;i<LAT-1;i++) begin
             done_cache[i+1]<= done_cache[i];
         end
     end
 end
 
-assign done = done_cache[2*N-1];
+assign done = done_cache[LAT-1];
 
 endmodule

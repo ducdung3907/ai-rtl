@@ -1,5 +1,6 @@
 module synth_wrap #(
-    parameter int N = 4
+    parameter int N       = 4,
+    parameter int MAC_LAT = 2    // passed to complete_sa: 1 = single-cycle MAC, 2 = pipelined
 )(
     input  logic        clk,
     input  logic        rst_n,
@@ -20,7 +21,7 @@ module synth_wrap #(
     assign a_col = shift_in[N*8-1:0];
     assign b_row = shift_in[2*N*8-1:N*8];
 
-    complete_sa #(.N(N)) dut (
+    complete_sa #(.N(N), .MAC_LAT(MAC_LAT)) dut (
         .clk(clk), .rst_n(rst_n),
         .a_col(a_col), .b_row(b_row),
         .valid(valid), .start(start), .last(last),
