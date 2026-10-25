@@ -49,7 +49,7 @@ module mac8_pipe (
 );
 
     logic signed [15:0] prod;
-    logic clear1;
+    (* keep = "true" *) logic clear1;
 
     always_ff @(posedge clk) begin
         if ((!valid_in)||(!rst_n)) begin

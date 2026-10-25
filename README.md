@@ -2,7 +2,9 @@
 
 A parameterised **N×N output-stationary systolic array** in SystemVerilog that computes **C = A × B** on signed 8-bit inputs with 32-bit accumulators, the core operation of neural-network accelerators such as Google's TPU.
 
-You feed plain matrices one column of A and one row of B per cycle; the hardware skews the inputs, streams them through N² multiply-accumulate units, and raises `done` the cycle the result is ready. Verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices, and synthesised for FPGAs up to N = 16 (256 PEs, 114 MHz, 58 GOPS peak on an AMD Artix-7).
+You feed plain matrices one column of A and one row of B per cycle; the hardware skews the inputs, streams them through N² multiply-accumulate units, and raises `done` the cycle the result is ready. Two MAC designs are selectable with one parameter: a single-cycle MAC built from logic, and a two-stage pipelined MAC that maps onto one DSP48E1 per PE.
+
+On an AMD Artix-7 the pipelined array holds **above 220 MHz up to N = 15** (225 PEs, about **99 GOPS** peak) while using **under 150 LUTs**, compared with 114 MHz and 33,371 LUTs for the single-cycle version at N = 16. Everything is verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices, for both MAC designs.
 
 ## Block diagram
 
@@ -15,7 +17,7 @@ flowchart LR
     SA -- "a, valid, clear" --> ARR["N×N systolic array<br/>(N² PEs)"]
     SB -- "b, valid" --> ARR
     ARR --> C["acc[i][j] = C[i][j]"]
-    L["last"] --> D["delay line<br/>2N−1 cycles"] --> DONE["done"]
+    L["last"] --> D["delay line<br/>2(N−1) + MAC_LAT cycles"] --> DONE["done"]
 ```
 
 Inside the array, `a` values move right and `b` values move down, one PE per cycle. Each PE multiplies the pair passing through it and keeps its own running sum:
@@ -37,20 +39,26 @@ PE(i,j) accumulates C[i][j] = Σk A[i][k] · B[k][j]
 ## Features
 
 - **Parameterised size N** (tested N = 2, 3, 4, 8), built with `generate` loops
+- **Two MAC designs, one parameter:** `MAC_LAT = 1` (single-cycle) or `MAC_LAT = 2` (pipelined, one DSP48 per PE); the `done` timing follows automatically
 - **Any inner dimension K:** an N×N array computes (N×K) × (K×N) for any K; the 32-bit accumulator has headroom for very long sums
 - **Signed int8 × int8 → int32** multiply-accumulate in every PE
 - **Hardware input skewing:** the array takes unskewed columns and rows straight from memory
 - **Valid signals travel with the data:** idle cycles (bubbles) anywhere in the input are ignored
 - **Per-row clear travelling with the data:** matrices can be streamed back to back with no gap
-- **`done` signal:** pulses exactly 2N−1 cycles after the last column, on the first cycle all results are final
-- **Area-aware registers:** control signals (valid, start, done) have async reset; data-path delay registers do not, since their valid bit marks them as unused
+- **`done` signal:** pulses exactly 2(N−1) + MAC_LAT cycles after the last column, on the first cycle all results are final
+- **Area-aware registers:** control signals (valid, start, done) have a reset; data registers (skew lanes, forwarded `a` and `b`) do not, since their valid bit marks them as unused
 
 ## Top-level interface: `complete_sa`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `N` | 4 | Array size (N×N PEs) |
+| `MAC_LAT` | 2 | MAC latency in cycles: 1 = single-cycle `mac8`, 2 = pipelined `mac8_pipe` |
 
 | Port | Dir | Width | Description |
 | --- | --- | --- | --- |
 | `clk` | in | 1 | Clock |
-| `rst_n` | in | 1 | Asynchronous reset, active low |
+| `rst_n` | in | 1 | Reset, active low (hold for at least one clock edge: the pipelined MAC resets synchronously) |
 | `a_col` | in | `[N-1:0][7:0]` | Column k of A: `a_col[i] = A[i][k]` |
 | `b_row` | in | `[N-1:0][7:0]` | Row k of B: `b_row[j] = B[k][j]` |
 | `valid` | in | 1 | This cycle's column/row is real data |
@@ -81,17 +89,29 @@ For N = 2, the inputs reaching the array look like this:
 
 | Quantity | Value |
 | --- | --- |
-| Last product in PE(N−1, N−1) | cycle K + 2N − 3 |
-| `done` after the last column | 2N − 1 cycles = (N−1) skew + (N−1) PE hops + 1 accumulate |
-| First column to `done` | K + 2N − 2 cycles |
-| Peak throughput | N² multiply-accumulates per cycle |
+| `done` after the last column | 2(N−1) + MAC_LAT cycles = (N−1) skew + (N−1) PE hops + MAC latency |
+| First column to `done` | K + 2(N−1) + MAC_LAT − 1 cycles |
+| Peak throughput | N² multiply-accumulates per cycle (both MAC designs) |
+
+The pipelined MAC adds its extra cycle **once**, not once per PE: `a` and `b` reach the next PE through the PE's forwarding registers, not through the MAC, so the MAC's latency only delays each PE's own result.
+
+## The two MACs
+
+**`mac8` (MAC_LAT = 1):** multiply and accumulate in one cycle. Simple, but the critical path is input register → 8×8 multiplier → 32-bit adder at every array size.
+
+**`mac8_pipe` (MAC_LAT = 2):** two stages, written so Vivado maps the whole MAC into one DSP48E1 (product in the M register, sum in the P register):
+
+1. **Stage 1:** `prod <= a × b`, or **0** when the input is invalid or in reset. `clear1` is the clear delayed by one cycle.
+2. **Stage 2:** `acc <= prod` when `clear1` is set, otherwise `acc <= acc + prod`.
+
+Forcing invalid products to zero collapses the four cases (load, clear, add, hold) into two (load or add), since adding 0 is the same as holding. Stage 2 therefore depends on a single register bit, `clear1`, which drives the DSP's OPMODE pin with no logic in between. All resets are synchronous, as the DSP's internal registers require, and `clear1` carries a `keep` attribute so synthesis keeps one copy per PE (see the timing results below).
 
 ## Modules
 
 | File | Module | Description |
 | --- | --- | --- |
-| [`rtl/mac.sv`](rtl/mac.sv) | `mac8` | Signed int8 multiply-accumulate with 32-bit accumulator, `valid` and `clear` |
-| [`rtl/pe.sv`](rtl/pe.sv) | `pe8` | Processing element: `mac8` plus registers that forward a, b, valid and clear to neighbours |
+| [`rtl/mac.sv`](rtl/mac.sv) | `mac8`, `mac8_pipe` | Single-cycle MAC, and the two-stage pipelined MAC for DSP48 mapping |
+| [`rtl/pe.sv`](rtl/pe.sv) | `pe8` | Processing element: selects the MAC with `MAC_LAT`, plus registers that forward a, b, valid and clear |
 | [`rtl/sa2x2.sv`](rtl/sa2x2.sv) | `sa2x2` | 2×2 array wired by hand (first step towards N×N) |
 | [`rtl/saNxN.sv`](rtl/saNxN.sv) | `systolic_array` | Parameterised N×N array built with nested `generate` loops |
 | [`rtl/skew.sv`](rtl/skew.sv) | `skew` | Input skewing: lane i delayed by i cycles, with valid and start |
@@ -99,60 +119,63 @@ For N = 2, the inputs reaching the array look like this:
 
 ## Verification
 
-Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. Results below are with Icarus Verilog 12 at the default size N = 4.
+Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. Results with Icarus Verilog 12:
 
 | Testbench | Covers | Result |
 | --- | --- | --- |
-| [`tb/tb_mac.sv`](tb/tb_mac.sv) | Directed accumulate test | PASS |
-| [`tb/tb_pe.sv`](tb/tb_pe.sv) | Reset, forwarding, valid gating, 5000 random cycles | PASS (5010 checks) |
-| [`tb/tb_sa2x2.sv`](tb/tb_sa2x2.sv) | 6 directed matrices + 1000 random, skew done in testbench | PASS (1006 multiplications) |
-| [`tb/tb_asNxN.sv`](tb/tb_asNxN.sv) | Identity, K = 1, extreme values, back-to-back, 500 random with varying K | PASS (555 multiplications) |
-| [`tb/tb_skew.sv`](tb/tb_skew.sv) | Reset with inputs active, counting pattern, 2000 random cycles | PASS (8036 checks) |
-| [`tb/tb_sa_top.sv`](tb/tb_sa_top.sv) | Full chain from unskewed input: directed, bubbles with junk data, back-to-back, 500 random; exact `done` timing | PASS (605 multiplications, 562 bubble cycles) |
+| [`tb/tb_mac.sv`](tb/tb_mac.sv) | Directed accumulate test (`mac8`) | PASS |
+| [`tb/tb_pe.sv`](tb/tb_pe.sv) | Reset, forwarding, valid gating, 5,000 random cycles; reference model delayed by the MAC latency | PASS for MAC_LAT = 1 and 2 (5,011 / 5,012 checks) |
+| [`tb/tb_sa2x2.sv`](tb/tb_sa2x2.sv) | 6 directed matrices + 1,000 random, skew done in the testbench | PASS (1,006 multiplications) |
+| [`tb/tb_asNxN.sv`](tb/tb_asNxN.sv) | Identity, K = 1, extreme values, back-to-back, 500 random with varying K | PASS at N = 2, 3, 4, 8 (555 multiplications each) |
+| [`tb/tb_skew.sv`](tb/tb_skew.sv) | Reset with inputs active, counting pattern, 2,000 random cycles | PASS at N = 2, 3, 4, 8 (up to 16,104 checks) |
+| [`tb/tb_sa_top.sv`](tb/tb_sa_top.sv) | Full chain from unskewed input: directed, bubbles with junk data, back-to-back, 500 random; exact `done` timing | PASS at N = 2, 3, 4, 8 for MAC_LAT = 1 and 2 (605 multiplications each) |
 
-The N×N, skew and top-level testbenches also pass at N = 2, 3 and 8. Each testbench was checked against deliberately broken versions of the design (wrong wiring, missing reset, misaligned valid, clear not travelling with the data, `done` one cycle late) to make sure it catches real bugs.
+Each testbench was also checked against deliberately broken designs (wrong wiring, missing reset, misaligned valid, clear not travelling with the data, `done` one cycle late, and for the pipelined MAC: using `clear` instead of `clear1`, a stuck valid, a product register without reset) to make sure it catches real bugs.
 
 ## Running the tests
 
 Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root:
 
 ```bash
-# Full system (skew + array + done)
-iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv rtl/skew.sv rtl/sa_top.sv tb/tb_sa_top.sv
+# Full system (skew + array + done), pipelined MAC
+iverilog -g2012 -Ptb_complete_sa.MAC_LAT=2 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv rtl/skew.sv rtl/sa_top.sv tb/tb_sa_top.sv
 vvp sim.vvp
 
 # Individual blocks
 iverilog -g2012 -o sim.vvp rtl/mac.sv tb/tb_mac.sv && vvp sim.vvp
-iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv tb/tb_pe.sv && vvp sim.vvp
+iverilog -g2012 -Ptb_pe8.MAC_LAT=2 -o sim.vvp rtl/mac.sv rtl/pe.sv tb/tb_pe.sv && vvp sim.vvp
 iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/sa2x2.sv tb/tb_sa2x2.sv && vvp sim.vvp
 iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv tb/tb_asNxN.sv && vvp sim.vvp
 iverilog -g2012 -o sim.vvp rtl/skew.sv tb/tb_skew.sv && vvp sim.vvp
 ```
 
-Other sizes and random seeds:
+Other sizes, MAC designs and random seeds:
 
 ```bash
-iverilog -g2012 -Ptb_complete_sa.N=8 -o sim.vvp rtl/*.sv tb/tb_sa_top.sv
+iverilog -g2012 -Ptb_complete_sa.N=8 -Ptb_complete_sa.MAC_LAT=1 -o sim.vvp rtl/*.sv tb/tb_sa_top.sv
 vvp sim.vvp +seed=42
 ```
 
 ## Synthesis results
 
-The same RTL was synthesised, placed and routed for two FPGAs with two toolflows: **AMD Artix-7** with **Vivado**, and **Lattice ECP5** with the open-source **sv2v + Yosys + nextpnr** flow. Both report area after place and route and the maximum clock frequency from static timing analysis.
+The same RTL was synthesised, placed and routed for two FPGAs with two toolflows: **AMD Artix-7** with **Vivado**, and **Lattice ECP5** with the open-source **sv2v + Yosys + nextpnr** flow. Max clock comes from static timing analysis after place and route. Peak throughput = 2 operations (multiply + add) × N² PEs × max clock.
 
-| N | PEs | Artix-7 LUTs | Artix-7 max clock | ECP5 max clock | Artix-7 peak throughput |
-| --- | --- | --- | --- | --- | --- |
-| 2 | 4 | 530 | 128 MHz | 85.7 MHz | 1.0 GOPS |
-| 4 | 16 | 2,098 | 122 MHz | 80.2 MHz | 3.9 GOPS |
-| 8 | 64 | 8,424 | 121 MHz | 63.5 MHz | 15.5 GOPS |
-| 12 | 144 | 18,821 | 117 MHz | – | 33.7 GOPS |
-| 16 | 256 | 33,371 | 114 MHz | does not fit | 58.3 GOPS |
+**Summary (Artix-7 XC7A100T):**
 
-*Peak throughput: 2 operations (multiply + add) per PE per cycle at the maximum clock.*
+| N | PEs | Single-cycle MAC (LUTs) | Pipelined MAC (DSP48) |
+| --- | --- | --- | --- |
+| 2 | 4 | 530 LUTs, 128 MHz, 1.0 GOPS | 6 LUTs + 4 DSPs, 297 MHz, 2.4 GOPS |
+| 4 | 16 | 2,098 LUTs, 122 MHz, 3.9 GOPS | 11 LUTs + 16 DSPs, 282 MHz, 9.0 GOPS |
+| 8 | 64 | 8,424 LUTs, 121 MHz, 15.5 GOPS | 47 LUTs + 64 DSPs, 256 MHz, 32.8 GOPS |
+| 12 | 144 | 18,821 LUTs, 117 MHz, 33.7 GOPS | 102 LUTs + 144 DSPs, 233 MHz, 67.0 GOPS |
+| 15 | 225 | – | 147 LUTs + 225 DSPs, 221 MHz, 99.4 GOPS |
+| 16 | 256 | 33,371 LUTs, 114 MHz, 58.3 GOPS | 1,685 LUTs + 240 DSPs, 189 MHz, 96.8 GOPS |
 
 ### AMD Artix-7 (Vivado)
 
 Target: **XC7A100T-1CSG324** (63,400 LUTs, 126,800 flip-flops, 240 DSP48E1 slices), the FPGA on the Nexys A7-100T and Arty A7-100T boards. `complete_sa` was synthesised out of context (`-mode out_of_context`, so its ports need no FPGA pins) with Vivado's default synthesis and implementation strategies and a 5 ns clock constraint ([`synth/timing.xdc`](synth/timing.xdc)); the maximum clock is 1 / (5 ns − WNS).
+
+#### Single-cycle MAC (`MAC_LAT = 1`, LUT multipliers)
 
 | N | PEs | LUTs | % of chip | LUTRAM | Flip-flops | DSPs | WNS at 5 ns | Max clock | Power (est.) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -162,26 +185,48 @@ Target: **XC7A100T-1CSG324** (63,400 LUTs, 126,800 flip-flops, 240 DSP48E1 slice
 | 12 | 144 | 18,821 | 30% | 64 | 7,328 | 0 | −3.544 ns | 117 MHz | 0.71 W |
 | 16 | 256 | 33,371 | 53% | 96 | 13,069 | 0 | −3.781 ns | 114 MHz | 1.16 W |
 
-*Vivado 2026.1. With its default settings Vivado builds the 8×8 multipliers from LUTs and carry chains rather than DSP48 slices. Power is Vivado's vectorless estimate at the 200 MHz constraint (medium confidence), not a measurement.*
+*These runs used the RTL before the `MAC_LAT` refactor; N = 2 was re-run with the current code and gave the same LUT count and clock (530 LUTs, WNS −2.800 ns). With its default settings Vivado builds the 8×8 multipliers from LUTs and carry chains rather than DSP48 slices. Power is Vivado's vectorless estimate at the 5 ns constraint (medium confidence), not a measurement.*
 
-- **Area scales linearly with the number of PEs:** about 125 LUTs per PE from N = 2 to N = 16, so the size of any array can be predicted before synthesis. The flip-flop counts match Yosys' technology-independent count (183 vs 183 at N = 2 with a relaxed 10 ns constraint, 820 vs 819 at N = 4); the tight 5 ns constraint makes Vivado duplicate a few registers for timing.
-- **The clock barely drops as the array grows:** 128 → 114 MHz (−11%) while the array grows 64×, so throughput scales almost linearly to 58 GOPS. Every PE only connects to its neighbours, so a bigger array does not create longer wires inside the array, and LUT-based multipliers can sit right next to their PE.
-- **The critical path is the single-cycle MAC.** At N = 16 the worst path starts at PE(7,11)'s `b` forwarding register and ends at bit 30 of PE(8,11)'s accumulator: one PE hop, the multiplier and the 32-bit accumulator adder in one clock cycle. The high accumulator bits are last because the carry ripples up the adder.
-- **Unreset delay lines become LUT shift registers.** From N = 8, Vivado packs the longer skew lanes into SRL shift registers (one LUT replaces a chain of flip-flops), which is why LUTRAM appears and the flip-flop count falls below Yosys' (3,265 vs 3,435 at N = 8). This is only possible because the skew data registers have no reset; the valid and start bits keep their reset and stay flip-flops.
-- **Logic is optimised across module boundaries.** Vivado reports some LUTs under the `skew` instances; the netlist shows these are partial-product logic of the multipliers in the first PE column, placed next to the skew registers that feed them. Totals are unaffected.
+- **Area scales linearly with the number of PEs:** about 125 LUTs per PE, so the size of any array can be predicted before synthesis.
+- **The clock barely drops as the array grows:** 128 → 114 MHz (−11%) while the array grows 64×. Every PE only connects to its neighbours, and LUT-based multipliers can sit right next to their PE.
+- **The critical path is the single-cycle MAC:** at N = 16 the worst path runs from one PE's `b` forwarding register through the multiplier and the 32-bit adder into the next PE's accumulator. The high accumulator bits are last because the carry ripples up the adder.
+- **Unreset delay lines become LUT shift registers:** from N = 8, Vivado packs the longer skew lanes into SRLs, which is why LUTRAM appears. This only works because the skew data registers have no reset.
+- **Forcing DSPs on the single-cycle MAC does not help:** with `(* use_dsp = "yes" *)` at N = 2 it uses 202 LUTs, 59 flip-flops and 8 DSPs (two per PE) but runs at only 119 MHz, because multiply and accumulate cannot share one DSP in a single cycle. This motivated the pipelined MAC.
 
-**LUT vs DSP multipliers (N = 2).** Adding `(* use_dsp = "yes" *)` to `mac8` moves the arithmetic into DSP48E1 slices:
+#### Pipelined MAC (`MAC_LAT = 2`, one DSP48E1 per PE)
 
-| N = 2 | LUTs | Flip-flops | DSPs | Max clock |
-| --- | --- | --- | --- | --- |
-| LUT multipliers (default) | 530 | 185 | 0 | 128 MHz |
-| DSP multipliers (`use_dsp`) | 202 | 59 | 8 | 119 MHz |
+The pipelined MAC was improved in two steps, each guided by the timing report:
 
-The DSP version uses 62% fewer LUTs and 68% fewer flip-flops (the accumulators move into the DSPs' output registers) but is not faster, and it uses two DSPs per PE (multiply and accumulate separately). With a single-cycle MAC the DSPs' internal pipeline registers cannot be used, so the path runs through two DSP blocks in one cycle. A pipelined MAC that fits in one DSP per PE is the obvious next step.
+| N | PEs | First version | + zeroed products (OPMODE fix) | + `keep` on `clear1` (final) | Total gain |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 4 | 226.9 MHz | 285.3 MHz | **297.0 MHz** | +31% |
+| 4 | 16 | 223.5 MHz | 265.0 MHz | **281.7 MHz** | +26% |
+| 8 | 64 | 215.4 MHz | 231.3 MHz | **256.0 MHz** | +19% |
+| 12 | 144 | 203.7 MHz | 221.6 MHz | **232.8 MHz** | +14% |
+| 15 | 225 | 202.6 MHz | 218.0 MHz | **220.9 MHz** | +9% |
+| 16 | 256 | 192.6 MHz | 193.0 MHz | 189.0 MHz | – (limited by LUT-built MACs) |
 
-**Size limit.** With LUT multipliers the XC7A100T fits up to roughly N = 18–20 before routing becomes difficult (N = 32 would need about twice the chip's LUTs). With one DSP per PE the 240 DSP slices allow N = 15; combining DSP and LUT PEs, or a larger device, would go further.
+Final version in detail:
 
-Elaborated RTL schematic of `complete_sa` (N = 2) and the placed N = 16 design on the chip:
+| N | PEs | LUTs | LUTRAM | Flip-flops | DSPs | WNS at 5 ns | Max clock | Peak throughput | Power (est.) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 4 | 6 | 0 | 12 | 4 | +1.633 ns | 297.0 MHz | 2.4 GOPS | 0.09 W |
+| 4 | 16 | 11 | 0 | 196 | 16 | +1.450 ns | 281.7 MHz | 9.0 GOPS | 0.12 W |
+| 8 | 64 | 47 | 24 | 1,052 | 64 | +1.094 ns | 256.0 MHz | 32.8 GOPS | 0.24 W |
+| 12 | 144 | 102 | 56 | 2,436 | 144 | +0.704 ns | 232.8 MHz | 67.0 GOPS | 0.43 W |
+| 15 | 225 | 147 | 80 | 3,831 | 225 | +0.473 ns | 220.9 MHz | 99.4 GOPS | 0.63 W |
+| 16 | 256 | 1,685 | 88 | 5,400 | 240 | −0.290 ns | 189.0 MHz | 96.8 GOPS | 0.71 W |
+
+*Vivado 2026.1, same settings as above. Results per step: [`results_vivado_mac2_before.csv`](synth/results_vivado_mac2_before.csv), [`results_vivado_mac2_opmodefix.csv`](synth/results_vivado_mac2_opmodefix.csv), [`results_vivado_mac2_keep.csv`](synth/results_vivado_mac2_keep.csv).*
+
+- **About 20× fewer LUTs and roughly twice the clock** of the single-cycle design at every size. Nearly everything lives inside the DSPs, including the multiplier inputs' registers.
+- **First version: the DSP's OPMODE pin was the bottleneck.** Every critical path had the same shape: a control register → one LUT → the DSP48E1's OPMODE input, whose setup time (about 2.4 ns) used half the 5 ns cycle. The LUT combined `clear1` and `valid1` to choose between load, clear, add and hold.
+- **Step 1, zeroing invalid products:** with only `clear1` left, the LUT disappeared (0 logic levels) and the polarity inversion moved into the DSP (`IS_INVERTED`). +26% at N = 2.
+- **Step 2, stopping register merging:** every PE on a diagonal receives the same `start` at the same moment, so their `clear1` registers hold identical values, and Vivado merged them into one register per diagonal. At N = 15 one register drove 11 DSPs with 1.8 ns of wire. A `keep` attribute gives each PE its own copy: up to +11% more. The flip-flop counts match the predicted N² − (2N − 1) extra registers exactly for N = 2 to 12 (1, 9, 49, 121).
+- **The DSP count sets the size limit:** N = 15 (225 of 240 DSPs) is the largest all-DSP array. At N = 16 Vivado builds the remaining 16 MACs from LUTs (+1,500 LUTs) and the clock drops below 200 MHz.
+- **The 5 ns constraint understates small arrays:** where the slack is large Vivado stops optimising, so the true maximum at small N is higher. A one-off 3 ns run of the first version at N = 2 reached 278 MHz against 227 MHz from the 5 ns run.
+
+Elaborated RTL schematic of `complete_sa` (N = 2) and the placed single-cycle N = 16 design on the chip:
 
 ![Vivado RTL schematic, N = 2](docs/vivado_rtl_schematic_N2.png)
 
@@ -189,59 +234,70 @@ Elaborated RTL schematic of `complete_sa` (N = 2) and the placed N = 16 design o
 
 ### Lattice ECP5 (open-source flow)
 
-Target: **Lattice ECP5 LFE5U-85F** (83,640 LUTs, 156 hardware 18×18 multipliers). SystemVerilog is converted to Verilog with sv2v, synthesised with Yosys and placed and routed with nextpnr.
+Target: **Lattice ECP5 LFE5U-85F** (83,640 LUTs, 156 hardware 18×18 multipliers). SystemVerilog is converted to Verilog with sv2v, synthesised with Yosys and placed and routed with nextpnr (default router, `--seed 1`, 200 MHz target).
 
-| N | PEs | Generic gates | Flip-flops | ECP5 LUTs | ECP5 FFs | Multipliers | Max clock | Peak throughput |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2 | 4 | 3,264 | 183 | 540 | 295 | 4 | 85.7 MHz | 0.7 GOPS |
-| 4 | 16 | 13,284 | 819 | 1,975 | 941 | 16 | 80.2 MHz | 2.6 GOPS |
-| 8 | 64 | 53,291 | 3,435 | 8,172 | 3,361 | 64 | 63.5 MHz | 8.1 GOPS |
+| N | PEs | Max clock: single-cycle | Max clock: pipelined | Speed-up | ECP5 LUTs (both) | ECP5 FFs: single-cycle → pipelined | Multipliers |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 4 | 96.3 MHz | 139.9 MHz | +45% | 375 | 265 → 336 | 4 |
+| 4 | 16 | 82.9 MHz | 117.4 MHz | +42% | 1,259 | 761 → 1,033 | 16 |
+| 8 | 64 | 61.5 MHz | 93.4 MHz | +52% | 5,235 | 2,521 → 3,577 | 64 |
+| 12 | 144 | 48.3 MHz | did not route | – | 11,483 | 5,305 → – | 144 |
 
-*Generic gates and flip-flops: `complete_sa` alone, technology-independent (Yosys `synth`). ECP5 columns: after place and route, including the small measurement harness. Tools: Yosys 0.33, nextpnr-ecp5 0.6, sv2v 0.0.12; other versions give slightly different numbers.*
+*Results: [`results_mac1.csv`](synth/results_mac1.csv), [`results_mac2.csv`](synth/results_mac2.csv). The pipelined ECP5 numbers were measured with the first version of `mac8_pipe`; the later changes target Vivado's DSP48 mapping. Tools: Yosys and nextpnr-ecp5 0.9 from OSS CAD Suite; other versions and settings give different numbers.*
 
-- **Area grows linearly with the number of PEs:** about 830 generic gates, 125 ECP5 LUTs and one hardware multiplier per PE.
-- **The hardware multipliers set the size limit:** with 156 of them, N = 12 (144) is the largest square array that fits; N = 16 does not.
-- **The critical path is the single-cycle MAC:** PE input register → hardware multiplier → 32-bit adder → `acc`.
-- **The clock falls faster than on Artix-7** (86 → 64 MHz from N = 2 to 8). Every PE must use a hard multiplier in a fixed column, so in larger arrays more PEs end up far from their multiplier and the wires get longer.
+- **Pipelining is free in LUTs on the ECP5 too:** LUT counts match to within one; the cost is about 17 flip-flops per PE (the 16-bit product register plus a control bit).
+- **The clock still falls with N for both designs**, because every PE must reach a hard multiplier in a fixed column, and those wires get longer in bigger arrays.
+- **N = 12 fits but the pipelined version does not route:** with 144 of 156 multipliers in use, both nextpnr routers stopped converging (router1 after 2 hours, router2 with overused wires rising after iteration 28). The product registers add traffic around the crowded multiplier columns, where on the Artix-7 they sit inside each DSP48.
+- **Tool settings matter:** nextpnr's router2 gave 8–10% lower max clock than the default router on this design, so both MAC designs are compared with the same router.
 
 **Measurement harness.** The array has 2N×8 input and N²×32 output bits (2,048 at N = 8), far more than the FPGA's pins, and synthesis deletes any logic whose output is unused. [`synth/synth_wrap.sv`](synth/synth_wrap.sv) therefore loads the inputs from a one-pin shift register and XOR-folds all results into one 32-bit output over two register stages, so every PE is kept and the harness never limits the clock.
 
-**Reproduce:**
-
-```bash
-./synth/synth.sh          # N = 2, 4, 8 (a few minutes); writes synth/results.csv
-./synth/synth.sh 12       # larger sizes take much longer, mostly place and route
-```
-
-Requires [sv2v](https://github.com/zachjs/sv2v), [Yosys](https://github.com/YosysHQ/yosys) and [nextpnr-ecp5](https://github.com/YosysHQ/nextpnr), all available in [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build).
-
 ### Cross-tool findings
 
-- **Same RTL, different results:** at N = 8 the Artix-7 with Vivado runs 1.9× faster than the ECP5 with the open-source flow, and the gap widens with N.
-- **Hard multipliers are not automatically better.** On the ECP5 the fixed multiplier columns limit both size and clock; on the Artix-7, LUT multipliers scale further and hold the clock better, while DSP multipliers save area but need a pipelined MAC to also save time.
-- **Both flows agree on the design itself:** flip-flop counts match, and both identify the single-cycle MAC as the critical path.
+- **Hard blocks are fast only when their internal registers are used.** The single-cycle MAC was slower with DSPs than with LUTs on the Artix-7; the pipelined MAC, written to match the DSP48's register structure, doubled the clock.
+- **Where the pipeline register lives matters:** inside the DSP48 on the Artix-7 it costs nothing and routes easily; in the fabric next to the ECP5's fixed multiplier columns it adds routing pressure, enough to stop N = 12 routing.
+- **Synthesis optimisations can work against timing:** merging identical registers saves area but created high-fan-out nets; reading the timing path identified it and one attribute fixed it.
+
+## Reproducing the results
+
+**ECP5 (open-source, Linux or WSL):**
+
+```bash
+MAC_LAT=1 ./synth/synth.sh 2 4 8 12   # writes synth/results_mac1.csv
+MAC_LAT=2 ./synth/synth.sh 2 4 8      # writes synth/results_mac2.csv
+```
+
+Requires [sv2v](https://github.com/zachjs/sv2v), [Yosys](https://github.com/YosysHQ/yosys) and [nextpnr-ecp5](https://github.com/YosysHQ/nextpnr), all available in [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build). Larger sizes take much longer, mostly in place and route.
+
+**Artix-7 (Vivado):** open a project with the files in `rtl/`, `complete_sa` as top, part `xc7a100tcsg324-1`, out-of-context synthesis and `synth/timing.xdc`. Then in the Tcl Console:
+
+```tcl
+source synth/vivado_sweep_gui.tcl
+```
+
+It sets `N` and `MAC_LAT` for each run (edit the lists at the top of the script), runs synthesis and implementation, and appends one row per size to `synth/results_vivado_mac<L>.csv`.
 
 ## Repository layout
 
 ```
 rtl/      design files
 tb/       self-checking testbenches
-synth/    synthesis: Yosys/nextpnr script, measurement harness, results, Vivado timing constraint
+synth/    synthesis: Yosys/nextpnr script and harness, Vivado sweep script, timing constraint, results (CSV)
 docs/     figures (Vivado schematic and placed design)
 ```
 
 ## Limitations and next steps
 
-- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. Next step: copy results to an output buffer on `done` (double buffering).
+- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. Next step: copy results to an output buffer on `done`.
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
-- **Single-cycle MAC.** Multiply and add in the same cycle is the critical path at every size on both FPGAs. Next step: a two-stage MAC that fits in one DSP48 per PE, then re-measure area and maximum clock against the tables above.
-- **Capstone:** run an int8-quantised MNIST layer from PyTorch on the array in simulation and compare against the PyTorch result.
+- **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
+- **On hardware:** run the array on an FPGA board (QMTech Wukong, XC7A100T) with a UART link to a Python host, then an int8-quantised MNIST network with weights held in block RAM.
 
 ## AI use
 
-- **Design (RTL):** all design files in `rtl/` were written by me. Claude reviewed them, explained concepts and pointed out bugs, which I then fixed.
-- **Testbenches:** `tb/tb_mac.sv` was written by me. The other testbenches were generated by Claude and run against my designs.
-- **Synthesis:** the Yosys/nextpnr script and measurement harness in `synth/` were written by Claude. The Vivado runs were set up and run by me in the Vivado GUI.
+- **Design (RTL):** all design files in `rtl/` were written by me. Claude reviewed them, explained concepts and pointed out bugs, which I then fixed. The OPMODE fix (zeroing invalid products) and the `keep` attribute came out of analysing the Vivado timing reports with Claude; I implemented both.
+- **Testbenches:** `tb/tb_mac.sv` was written by me. The other testbenches were generated by Claude and run against my designs; the `MAC_LAT` changes to `tb_pe.sv` were also written by Claude.
+- **Synthesis:** the Yosys/nextpnr script, the measurement harness and the Vivado sweep script in `synth/` were written by Claude. The Vivado runs were set up and run by me.
 - **Documentation:** this README was drafted with Claude.
 
 ## Tools
