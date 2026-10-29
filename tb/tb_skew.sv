@@ -3,7 +3,7 @@
 module tb_skew;
     parameter N = 4;
     parameter  int RANDOM_CYCLES = 2000;
-    localparam int HIST_DEPTH = RANDOM_CYCLES + 4*N + 16;;   
+    localparam int HIST_DEPTH = RANDOM_CYCLES + 4*N + 16;  
     logic clk = 0;
     logic rst_n = 0;
     logic start_in = 0;
