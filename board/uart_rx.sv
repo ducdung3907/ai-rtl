@@ -37,11 +37,12 @@ module uart_rx #(
 
     always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        state        <= IDLE;
-        data         <= '0;
-        valid        <= 1'b0;
+        state <= IDLE;
+        data <= '0;
+        valid <= 1'b0;
         baud_counter <= '0;
-        bit_index    <= '0;
+        bit_index <= '0;
+        data_cache <= '0;
     end else begin
         state <= next_state;
         valid <= 1'b0;                             

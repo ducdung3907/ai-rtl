@@ -3,7 +3,6 @@
 # 50 MHz oscillator on M21 (not a clock-capable pin, so allow general routing)
 set_property PACKAGE_PIN M21 [get_ports sys_clk]
 set_property IOSTANDARD LVCMOS33 [get_ports sys_clk]
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets sys_clk_IBUF]
 create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 
 # KEY0 (SW2): pull-up, pressed = 0, used as active-low reset
