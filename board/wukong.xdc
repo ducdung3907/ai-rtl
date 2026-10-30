@@ -22,3 +22,7 @@ set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 
 # Configuration from SPI flash, quad mode (as in QMTECH's examples)
 set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]
+
+# Configuration bank 0: CFGBVS tied to 3.3 V on the Wukong V3
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
