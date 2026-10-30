@@ -49,7 +49,7 @@ always_ff @(posedge clk or negedge rst_n ) begin
                 baud_counter <= baud_counter + 1;
             end
         end    
-        if (valid && (state == IDLE)) begin
+        if (valid && ready) begin
             data_cache <= data;
             baud_counter <= '0;
         end
@@ -81,13 +81,14 @@ always_comb begin
         STOP: begin
             next_tx = 1;
             if (baud_counter == (CLKS_PER_BIT - 1)) begin
-                next_state = IDLE;
-            end
+                if (valid) next_state = START;
+                else next_state = IDLE;
+            end 
         end
         default: next_state = IDLE;
     endcase
 end
 
-assign ready = (state == IDLE);
+assign ready = ((state == IDLE)||(state == STOP && baud_counter == CLKS_PER_BIT - 1));
 
 endmodule

@@ -13,7 +13,8 @@
 //   Always checked:
 //     - every bit lasts exactly CPB clocks (tx is constant for the whole bit)
 //     - start bit = 0, stop bit = 1, data matches what was sent
-//     - ready stays low for the whole frame after a byte is accepted
+//     - ready stays low after a byte is accepted until the last clock of the
+//       stop bit (where the next byte may be accepted for back-to-back frames)
 //     - bytes received == bytes sent
 //
 // Run:
@@ -94,7 +95,8 @@ module tb_uart_tx;
 
     // ------------------------------------------------------------------
     // ready monitor: after a byte is accepted (valid && ready on a rising
-    // edge), ready must stay low for the whole frame (FRAME clocks).
+    // edge), ready must stay low until the last clock of the stop bit.
+    // It may rise in that last clock so the next frame can follow with no gap.
     // ------------------------------------------------------------------
     int busy_left = 0;
     always @(posedge clk) begin
@@ -102,7 +104,7 @@ module tb_uart_tx;
             if (ready) fail($sformatf("ready went high %0d clocks before the frame ended", busy_left));
             busy_left--;
         end
-        if (rst_n && valid && ready) busy_left = FRAME;   // accepted on this edge
+        if (rst_n && valid && ready) busy_left = FRAME - 1;   // accepted on this edge
     end
 
     // ------------------------------------------------------------------
