@@ -1,13 +1,13 @@
 module uart_rx #(
     parameter int CLK_HZ = 50_000_000,
-    parameter int BAUD   = 115_200
+    parameter int BAUD = 115_200
 )(
     input  logic clk, rst_n,
-    input  logic rx,          
-    output logic [7:0] data,       
-    output logic valid    
+    input  logic rx,
+    output logic [7:0] data,
+    output logic valid
 );
-    
+
     localparam int CLKS_PER_BIT = (CLK_HZ + BAUD/2) / BAUD ;
     localparam int HALF_CLKS_PER_BIT = CLKS_PER_BIT / 2;
 
@@ -45,15 +45,15 @@ module uart_rx #(
         data_cache <= '0;
     end else begin
         state <= next_state;
-        valid <= 1'b0;                             
+        valid <= 1'b0;
         case (state)
             IDLE: begin
-                baud_counter <= '0;                 
+                baud_counter <= '0;
             end
 
             START: begin
                 if (baud_counter == HALF_CLKS_PER_BIT - 1) begin
-                    baud_counter <= '0;            
+                    baud_counter <= '0;
                     bit_index    <= '0;
                 end else begin
                     baud_counter <= baud_counter + 1;
@@ -63,7 +63,7 @@ module uart_rx #(
             DATA: begin
                 if (baud_counter == CLKS_PER_BIT - 1) begin
                     baud_counter <= '0;
-                    data_cache[bit_index] <= rx_s2; 
+                    data_cache[bit_index] <= rx_s2;
                     bit_index <= bit_index + 1;
                 end else begin
                     baud_counter <= baud_counter + 1;
@@ -110,10 +110,10 @@ end
             STOP: begin
                 if (baud_counter == (CLKS_PER_BIT - 1)) begin
                     next_state = IDLE;
-                end 
+                end
             end
             default: next_state = IDLE;
-        endcase      
+        endcase
     end
 
 endmodule
