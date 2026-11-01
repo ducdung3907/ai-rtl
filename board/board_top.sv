@@ -32,9 +32,9 @@ end
 always_ff @(posedge sys_clk or negedge rst_n) begin
     if (!rst_n) begin
         pending <= 0;
-    end if (rx_valid) begin
+    end else if (rx_valid) begin
         pending <= 1;
-    end if (pending&&tx_ready) begin
+    end else if (pending&&tx_ready) begin
         pending <= 0;
     end
 end
