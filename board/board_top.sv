@@ -1,4 +1,7 @@
-module board_top (
+module board_top #(
+    parameter int CLK_HZ = 50_000_000,
+    parameter int BAUD = 115_200
+)(
     input  logic       sys_clk,
     input  logic       sys_rst_n,
     input  logic       uart_rx,
@@ -6,16 +9,15 @@ module board_top (
     output logic [1:0] led
 );
 
-parameter int CLK_HZ = 50_000_000;
-parameter int BAUD = 115_200;
-
-logic [$clog2(50_000_000)-1:0] counter;
+logic [$clog2(CLK_HZ)-1:0] counter;
 
 
 logic rst_n_1,rst_n;
 logic [1:0] led_state;
 logic [7:0] rx_data;
 logic rx_valid;
+logic pending;
+logic tx_ready;
 
 always_ff @(posedge sys_clk or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
@@ -24,6 +26,16 @@ always_ff @(posedge sys_clk or negedge sys_rst_n) begin
     end else begin
         rst_n_1 <= sys_rst_n;
         rst_n <= rst_n_1;
+    end
+end
+
+always_ff @(posedge sys_clk or negedge rst_n) begin
+    if (!rst_n) begin
+        pending <= 0;
+    end if (rx_valid) begin
+        pending <= 1;
+    end if (pending&&tx_ready) begin
+        pending <= 0;
     end
 end
 
@@ -45,8 +57,8 @@ uart_tx #(
     .clk(sys_clk),
     .rst_n(rst_n),
     .data(rx_data),
-    .valid(rx_valid),
-    .ready(),
+    .valid(pending),
+    .ready(tx_ready),
     .tx(uart_tx)
 );
 
