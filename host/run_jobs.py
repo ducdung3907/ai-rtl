@@ -1,12 +1,57 @@
 import argparse
 import struct
 import sys
+import time
 
 import numpy as np
 import serial
 
 
-def open_port(port, baud, timeout):
+class FakeBoard:
+    def __init__(self, N):
+        self.N = N
+        self.reply = b""
+
+    def reset_input_buffer(self):
+        self.reply = b""
+
+    def write(self, data):
+        if not data or data[0] != 0xA5 or len(data) < 3:
+            return len(data)
+
+        K = struct.unpack("<H", data[1:3])[0]
+        if len(data) != 3 + K * 2 * self.N:
+            return len(data)
+        if K == 0:
+            self.reply = b""
+            return len(data)
+
+        A = np.empty((self.N, K), dtype=np.int8)
+        B = np.empty((K, self.N), dtype=np.int8)
+        offset = 3
+        for k in range(K):
+            A[:, k] = np.frombuffer(data[offset : offset + self.N], dtype=np.int8)
+            offset += self.N
+            B[k, :] = np.frombuffer(data[offset : offset + self.N], dtype=np.int8)
+            offset += self.N
+        C = A.astype(np.int32) @ B.astype(np.int32)
+        self.reply = C.astype("<i4").tobytes()
+        return len(data)
+
+    def read(self, n):
+        result, self.reply = self.reply[:n], self.reply[n:]
+        return result
+
+    def close(self):
+        pass
+
+    def flush(self):
+        pass
+
+
+def open_port(port, baud, timeout, N):
+    if port == "fake":
+        return FakeBoard(N)
     if port == "loop":
         return serial.serial_for_url("loop://", baudrate=baud, timeout=timeout)
     else:
@@ -90,14 +135,39 @@ def run_job(ser, A, B):
     return True
 
 
+def run_jobs(ser, N, jobs, kmax, rng, baud):
+    passed = 0
+    bytes_moved = 0
+    start = time.perf_counter()
+    for job_number in range(1, jobs + 1):
+        K = int(rng.integers(1, kmax + 1))
+        A, B = make_job(N, K, rng)
+        bytes_moved += 3 + K * 2 * N + 4 * N * N
+        if not run_job(ser, A, B):
+            print(f"Job {job_number} failed (K={K})")
+            break
+        passed += 1
+    elapsed = time.perf_counter() - start
+
+    print(f"passed {passed} / {jobs} jobs")
+    print(f"Total time: {elapsed:.3f} s")
+    print(f"Jobs per second: {passed / elapsed:.2f}")
+    print(f"Bytes moved: {bytes_moved}")
+    print(f"Effective throughput: {bytes_moved / elapsed:.2f} bytes/s")
+    print(f"UART limit: {baud / 10:.0f} bytes/s")
+    return passed == jobs
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Run echo test on serial port")
-    parser.add_argument("--mode", choices=("echo", "job"), default="echo")
+    parser = argparse.ArgumentParser(description="Run serial tests")
+    parser.add_argument("--mode", choices=("echo", "job", "run"), default="echo")
     parser.add_argument("--port", default="loop", help="serial port or 'loop'")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--n", type=int, default=1000, help="number of bytes to send")
     parser.add_argument("--N", type=int, default=4, help="matrix dimension")
     parser.add_argument("--K", type=int, default=4, help="number of dot-product steps")
+    parser.add_argument("--jobs", type=int, default=1000, help="number of jobs in run mode")
+    parser.add_argument("--kmax", type=int, default=64, help="maximum K in run mode")
     parser.add_argument("--seed", type=int, default=1, help="random data seed")
     args = parser.parse_args()
 
@@ -105,18 +175,30 @@ def main():
         parser.error("--baud must be positive")
     if args.mode == "job" and (args.N <= 0 or args.K <= 0 or args.K > 65535):
         parser.error("job mode requires positive --N and --K, with --K <= 65535")
+    if args.mode == "run" and (
+        args.N <= 0 or args.jobs <= 0 or args.kmax <= 0 or args.kmax > 65535
+    ):
+        parser.error("run mode requires positive --N, --jobs, and --kmax, with --kmax <= 65535")
 
-    byte_count = args.n if args.mode == "echo" else 3 + args.K * 2 * args.N + 4 * args.N * args.N
+    if args.mode == "echo":
+        byte_count = args.n
+    elif args.mode == "run":
+        byte_count = 3 + args.kmax * 2 * args.N + 4 * args.N * args.N
+    else:
+        byte_count = 3 + args.K * 2 * args.N + 4 * args.N * args.N
     timeout = max(1.0, 20 * byte_count / args.baud + 1.0)
     ser = None
     try:
-        ser = open_port(args.port, args.baud, timeout)
+        ser = open_port(args.port, args.baud, timeout, args.N)
         if args.mode == "echo":
             success = echo_test(ser, args.n, args.seed)
-        else:
+        elif args.mode == "job":
             rng = np.random.default_rng(args.seed)
             A, B = make_job(args.N, args.K, rng)
             success = run_job(ser, A, B)
+        else:
+            rng = np.random.default_rng(args.seed)
+            success = run_jobs(ser, args.N, args.jobs, args.kmax, rng, args.baud)
         if success:
             print(f"{args.mode.capitalize()} test passed.")
         else:
