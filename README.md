@@ -1,10 +1,14 @@
 # ai-rtl: int8 Systolic Array Matrix Multiplier
 
+![simulation](https://github.com/ducdung3907/ai-rtl/actions/workflows/sim.yml/badge.svg)
+
 A parameterised **N×N output-stationary systolic array** in SystemVerilog that computes **C = A × B** on signed 8-bit inputs with 32-bit accumulators, the core operation of neural-network accelerators such as Google's TPU.
 
 You feed plain matrices one column of A and one row of B per cycle; the hardware skews the inputs, streams them through N² multiply-accumulate units, and raises `done` the cycle the result is ready. Two MAC designs are selectable with one parameter: a single-cycle MAC built from logic, and a two-stage pipelined MAC that maps onto one DSP48E1 per PE.
 
 On an AMD Artix-7 the pipelined array holds **above 220 MHz up to N = 15** (225 PEs, about **99 GOPS** peak) while using **under 150 LUTs**, compared with 114 MHz and 33,371 LUTs for the single-cycle version at N = 16. Everything is verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices, for both MAC designs.
+
+The array also has a **host interface for an FPGA board** (QMTech Wukong V3, XC7A100T): a UART receiver and transmitter, a job controller and a Python host script, so a PC can send A and B over USB and get C back. The whole path is verified in simulation, from bits on the UART pin to the 32-bit results; bring-up on the physical board is next. All 26 testbench runs execute on every push through GitHub Actions.
 
 ## Block diagram
 
@@ -116,25 +120,44 @@ Forcing invalid products to zero collapses the four cases (load, clear, add, hol
 | [`rtl/saNxN.sv`](rtl/saNxN.sv) | `systolic_array` | Parameterised N×N array built with nested `generate` loops |
 | [`rtl/skew.sv`](rtl/skew.sv) | `skew` | Input skewing: lane i delayed by i cycles, with valid and start |
 | [`rtl/sa_top.sv`](rtl/sa_top.sv) | `complete_sa` | Top level: two skew modules, the array and the `done` delay line |
+| [`board/uart_rx.sv`](board/uart_rx.sv) | `uart_rx` | 8N1 receiver: 2-flop synchroniser, mid-bit sampling, false-start and framing-error rejection, 1-clock `valid` |
+| [`board/uart_tx.sv`](board/uart_tx.sv) | `uart_tx` | 8N1 transmitter with valid/ready handshake; accepts the next byte in the last stop-bit clock, so frames follow with no gap |
+| [`board/sa_ctrl.sv`](board/sa_ctrl.sv) | `sa_ctrl` | Job controller: parses the host protocol, feeds `complete_sa` one step per K, snapshots `acc` on `done`, sends C back |
+| [`board/sa_board_top.sv`](board/sa_board_top.sv) | `sa_board_top` | Board top: reset synchroniser, UART, `sa_ctrl`, `complete_sa`, heartbeat and job LEDs |
+| [`board/board_top.sv`](board/board_top.sv) | `board_top` | Bring-up design: UART echo with a pending flag, heartbeat and byte LEDs |
+| [`board/wukong.xdc`](board/wukong.xdc), [`board/wukong_impl.xdc`](board/wukong_impl.xdc) | | Pin and clock constraints from the QMTECH Wukong V3 schematic (the second file is implementation-only) |
+| [`host/run_jobs.py`](host/run_jobs.py) | | Python host: echo test, single job, 1,000-job run with throughput report, and a software model of the board |
 
 ## Verification
 
-Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. Results with Icarus Verilog 12:
+Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (26 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
 
 | Testbench | Covers | Result |
 | --- | --- | --- |
-| [`tb/tb_mac.sv`](tb/tb_mac.sv) | Directed accumulate test (`mac8`) | PASS |
-| [`tb/tb_pe.sv`](tb/tb_pe.sv) | Reset, forwarding, valid gating, 5,000 random cycles; reference model delayed by the MAC latency | PASS for MAC_LAT = 1 and 2 (5,011 / 5,012 checks) |
+| [`tb/tb_mac.sv`](tb/tb_mac.sv) | Both MACs against one reference model: reset with inputs active, 13 directed cases, 20,000 weighted-random cycles, coverage counters | PASS (20,018 checks) |
+| [`tb/tb_pe.sv`](tb/tb_pe.sv) | Reset, forwarding, valid gating, directed cases, 20,000 random cycles; reference model delayed by the MAC latency | PASS for MAC_LAT = 1 and 2 (20,014 / 20,015 checks) |
 | [`tb/tb_sa2x2.sv`](tb/tb_sa2x2.sv) | 6 directed matrices + 1,000 random, skew done in the testbench | PASS (1,006 multiplications) |
 | [`tb/tb_asNxN.sv`](tb/tb_asNxN.sv) | Identity, K = 1, extreme values, back-to-back, 500 random with varying K | PASS at N = 2, 3, 4, 8 (555 multiplications each) |
-| [`tb/tb_skew.sv`](tb/tb_skew.sv) | Reset with inputs active, counting pattern, 2,000 random cycles | PASS at N = 2, 3, 4, 8 (up to 16,104 checks) |
+| [`tb/tb_skew.sv`](tb/tb_skew.sv) | Input-history model; reset with inputs active, impulse, counting pattern, all-bits toggle, 2,000 random cycles | PASS at N = 1 to 64 (32,737 checks at N = 8) |
 | [`tb/tb_sa_top.sv`](tb/tb_sa_top.sv) | Full chain from unskewed input: directed, bubbles with junk data, back-to-back, 500 random; exact `done` timing | PASS at N = 2, 3, 4, 8 for MAC_LAT = 1 and 2 (605 multiplications each) |
+| [`tb/tb_uart_tx.sv`](tb/tb_uart_tx.sv) | Receiver model and queue scoreboard; every bit exactly one bit time, `ready` timing, back-to-back frames | PASS (316 bytes) |
+| [`tb/tb_uart_rx.sv`](tb/tb_uart_rx.sv) | Asynchronous sender at ±2.5% baud error, glitches, bad stop bits, back-to-back, random gaps | PASS (238 bytes; glitches and bad frames ignored) |
+| [`tb/tb_board_top.sv`](tb/tb_board_top.sv) | Echo through the pins, continuous streams with the PC 0.5% fast and slow, LEDs | PASS (53 bytes each) |
+| [`tb/tb_sa_ctrl.sv`](tb/tb_sa_ctrl.sv) | Controller with the real `complete_sa`: K = 0, 1, N, 7, 256 and random, junk before the header, `tx_ready` backpressure, bytes during compute ignored | PASS at N = 2, 4, 8 for MAC_LAT = 1 and 2 (25 jobs each) |
+| [`tb/tb_sa_board_top.sv`](tb/tb_sa_board_top.sv) | Whole board path: a PC model sends jobs bit by bit into the `uart_rx` pin and checks C from the `uart_tx` pin | PASS (12 jobs; also at PC baud ±0.5%) |
 
 Each testbench was also checked against deliberately broken designs (wrong wiring, missing reset, misaligned valid, clear not travelling with the data, `done` one cycle late, and for the pipelined MAC: using `clear` instead of `clear1`, a stuck valid, a product register without reset) to make sure it catches real bugs.
 
 ## Running the tests
 
-Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root:
+Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root, run everything (about 5 minutes):
+
+```bash
+./sim/run_all.sh            # all 26 runs, exits 1 if any fails
+./sim/run_all.sh sa_ctrl    # only runs whose name contains "sa_ctrl"
+```
+
+Or single testbenches:
 
 ```bash
 # Full system (skew + array + done), pipelined MAC
@@ -155,6 +178,31 @@ Other sizes, MAC designs and random seeds:
 iverilog -g2012 -Ptb_complete_sa.N=8 -Ptb_complete_sa.MAC_LAT=1 -o sim.vvp rtl/*.sv tb/tb_sa_top.sv
 vvp sim.vvp +seed=42
 ```
+
+## On the board: UART host interface
+
+```
+PC (Python) ──USB── CH340 ──uart_rx pin──> uart_rx ──> sa_ctrl ──> complete_sa
+            <─────────────────uart_tx pin── uart_tx <──    ^              │
+                                                           └── done, acc ─┘
+```
+
+**Protocol (PC → FPGA):** header `0xA5`, then K (number of steps, 2 bytes little-endian, 1 to 65,535; K = 0 means no job), then K steps of 2N bytes: column k of A followed by row k of B, signed int8. **Reply:** the N×N results row by row, each a little-endian int32 (64 bytes at N = 4). `sa_ctrl` takes the snapshot of `acc` on `done`, so the reply is correct even if a new job starts.
+
+**Board:** QMTECH Wukong V3 (XC7A100T-1FGG676C, 50 MHz oscillator, CH340 USB-UART). Pins and the configuration-bank settings come from the V3 schematic; the 50 MHz clock arrives on a non-clock-capable pin, which `wukong_impl.xdc` allows. The echo design uses 79 LUTs and 86 flip-flops (matching a hand count of every register) and meets timing at 50 MHz with 15.7 ns of slack.
+
+**Host script:**
+
+```bash
+python host/run_jobs.py --mode echo --port COM5                 # with the board_top (echo) bitstream
+python host/run_jobs.py --mode job  --port COM5 --N 4 --K 16    # one job, compared with NumPy
+python host/run_jobs.py --mode run  --port COM5 --jobs 1000     # 1,000 random jobs, jobs/s and throughput
+python host/run_jobs.py --mode run  --port fake                 # no board: software model of sa_ctrl
+```
+
+**Expected throughput:** 1,000 jobs with K up to 64 move about 325 KB. At 115,200 baud the UART carries at most 11,520 bytes/s, so the run takes at least about 28 s (about 35 jobs/s), while the array computes each job in about a microsecond. The link, not the array, sets the speed.
+
+**Status:** verified in simulation end to end; hardware bring-up in progress.
 
 ## Synthesis results
 
@@ -280,23 +328,30 @@ It sets `N` and `MAC_LAT` for each run (edit the lists at the top of the script)
 ## Repository layout
 
 ```
-rtl/      design files
+rtl/      array design files
+board/    UART, job controller, board tops and Wukong V3 constraints
+host/     Python host script
 tb/       self-checking testbenches
+sim/      run_all.sh: every testbench across sizes and settings
 synth/    synthesis: Yosys/nextpnr script and harness, Vivado sweep script, timing constraint, results (CSV)
 docs/     figures (Vivado schematic and placed design)
+.github/  GitHub Actions workflow running sim/run_all.sh
 ```
 
 ## Limitations and next steps
 
-- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. Next step: copy results to an output buffer on `done`.
+- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by copying `acc` on `done` and waiting for the reply to finish before the next job; a separate output buffer would let compute and reply overlap.
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
 - **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
-- **On hardware:** run the array on an FPGA board (QMTech Wukong, XC7A100T) with a UART link to a Python host, then an int8-quantised MNIST network with weights held in block RAM.
+- **On hardware:** the UART host path is complete in simulation; next is bring-up on the Wukong board, higher baud rates (1 and 2 Mbaud are exact at 50 MHz), then an int8-quantised MNIST network with weights held in block RAM.
+- **UART speed:** a stream from a PC whose clock runs fast can eventually outrun the transmitter (a slower sender cannot keep up forever); jobs avoid it because the host waits for each reply. A small FIFO would cover long streams.
 
 ## AI use
 
 - **Design (RTL):** all design files in `rtl/` were written by me. Claude reviewed them, explained concepts and pointed out bugs, which I then fixed. The OPMODE fix (zeroing invalid products) and the `keep` attribute came out of analysing the Vivado timing reports with Claude; I implemented both.
-- **Testbenches:** tb/tb_mac.sv was written by me. The other testbenches, and their MAC_LAT updates, were generated with Claude and run against my designs. I plan to rewrite them myself as a verification exercise.
+- **Board RTL:** `uart_rx`, `uart_tx`, `board_top`, `sa_board_top` and `sa_ctrl` were written by me (for `sa_ctrl` from a state-machine template), with Claude reviewing each version and pointing out bugs. The Wukong pin constraints were taken from the QMTECH V3 schematic with Claude.
+- **Testbenches:** `tb_mac`, `tb_skew` and `tb_pe` were written by me, and review by Claude. The others (`tb_sa2x2`, `tb_asNxN`, `tb_sa_top` and the UART, board and controller testbenches) were generated with Claude and run against my designs; I am rewriting them one by one.
+- **Host and CI:** `host/run_jobs.py` was written by me with Claude reviewing it. `sim/run_all.sh` and the GitHub Actions workflow were written by Claude.
 - **Synthesis:** the Yosys/nextpnr script, the measurement harness and the Vivado sweep script in `synth/` were written by Claude. The Vivado runs were set up and run by me.
 - **Documentation:** this README was drafted with Claude.
 
@@ -306,3 +361,5 @@ docs/     figures (Vivado schematic and placed design)
 - Icarus Verilog 12 for simulation
 - sv2v, Yosys and nextpnr for open-source synthesis and place and route (Lattice ECP5)
 - AMD Vivado 2026.1 for synthesis and implementation (Artix-7)
+- Python 3 with NumPy and pyserial for the host script
+- GitHub Actions with OSS CAD Suite for continuous integration
