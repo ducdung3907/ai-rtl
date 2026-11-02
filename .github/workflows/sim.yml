@@ -1,0 +1,29 @@
+# Runs every testbench on each push and pull request.
+# Result: a green check or red cross next to the commit / PR on GitHub.
+name: simulation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  testbenches:
+    runs-on: ubuntu-24.04          # its apt package is Icarus Verilog 12, same as local
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OSS CAD Suite
+        uses: YosysHQ/setup-oss-cad-suite@v3
+
+      - name: Show tool version
+        run: iverilog -V 2>&1 | head -1
+
+      - name: Run all testbenches
+        run: ./sim/run_all.sh
+
+      - name: Upload logs (always, so failures can be inspected)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-logs
+          path: sim/logs/*.log
