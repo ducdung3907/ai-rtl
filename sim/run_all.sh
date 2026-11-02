@@ -46,6 +46,7 @@ RUNS=(
   "sa_ctrl_n4_lat1  | tb/tb_sa_ctrl.sv   | tb_sa_ctrl       | N=4 MAC_LAT=1"
   "sa_ctrl_n2       | tb/tb_sa_ctrl.sv   | tb_sa_ctrl       | N=2"
   "sa_ctrl_n8       | tb/tb_sa_ctrl.sv   | tb_sa_ctrl       | N=8"
+  "sa_board_top     | tb/tb_sa_board_top.sv  | tb_sa_board_top  | "
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
