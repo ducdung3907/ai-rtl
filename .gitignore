@@ -32,3 +32,6 @@ model/vectors/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+#env
+.venv/
