@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+
 module uart_tx #(
     parameter int CLK_HZ = 50_000_000,
     parameter int BAUD   = 115_200

@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+
 module sa_ctrl #(
     parameter int N = 4
 )(
@@ -21,7 +23,7 @@ module sa_ctrl #(
 logic [1:0]k_counter; 
 logic [$clog2(N)-1:0] counter;
 logic [1:0][7:0] k_cache;
-logic a_or_b = '0;//a is 0 and b is 1
+logic a_or_b;
 logic [N-1:0][N-1:0][31:0] acc_reg;
 logic [$clog2(N)-1:0] tx_col, tx_row;
 logic [1:0] byte_counter; 

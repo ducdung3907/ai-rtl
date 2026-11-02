@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+
 module board_top #(
     parameter int CLK_HZ = 50_000_000,
     parameter int BAUD = 115_200
@@ -23,7 +25,7 @@ always_ff @(posedge sys_clk or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
         rst_n <= 0;
         rst_n_1 <= 0;
-    end else begin
+    end else begin //metastability protector
         rst_n_1 <= sys_rst_n;
         rst_n <= rst_n_1;
     end
