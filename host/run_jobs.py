@@ -135,15 +135,52 @@ def run_job(ser, A, B):
     return True
 
 
-def run_jobs(ser, N, jobs, kmax, rng, baud):
+def run_jobs(ser, N, jobs, kmax, rng, baud, prep=False):
+    prepared = []
+    if prep:
+        for _ in range(jobs):
+            K = int(rng.integers(1, kmax + 1))
+            A, B = make_job(N, K, rng)
+            packet = build_job(A, B)
+            expected = A.astype(np.int32) @ B.astype(np.int32)
+            prepared.append((K, packet, expected))
+
     passed = 0
     bytes_moved = 0
+    write_time = 0.0
+    read_time = 0.0
+    ser.reset_input_buffer()
     start = time.perf_counter()
     for job_number in range(1, jobs + 1):
-        K = int(rng.integers(1, kmax + 1))
-        A, B = make_job(N, K, rng)
-        bytes_moved += 3 + K * 2 * N + 4 * N * N
-        if not run_job(ser, A, B):
+        if prep:
+            K, packet, expected = prepared[job_number - 1]
+        else:
+            K = int(rng.integers(1, kmax + 1))
+            A, B = make_job(N, K, rng)
+            packet = build_job(A, B)
+            expected = A.astype(np.int32) @ B.astype(np.int32)
+
+        write_start = time.perf_counter()
+        written = ser.write(packet)
+        write_time += time.perf_counter() - write_start
+
+        read_start = time.perf_counter()
+        data = ser.read(4 * N * N)
+        read_time += time.perf_counter() - read_start
+
+        bytes_moved += len(packet) + len(data)
+        if written != len(packet) or len(data) < 4 * N * N:
+            print(f"Job {job_number} failed (K={K}): incomplete write/read")
+            break
+
+        result = parse_reply(data, N)
+        if not np.array_equal(result, expected):
+            print("Received matrix:")
+            print(result)
+            print("Expected matrix:")
+            print(expected)
+            print("Mismatch indices (row, column):")
+            print(np.argwhere(result != expected))
             print(f"Job {job_number} failed (K={K})")
             break
         passed += 1
@@ -151,9 +188,16 @@ def run_jobs(ser, N, jobs, kmax, rng, baud):
 
     print(f"passed {passed} / {jobs} jobs")
     print(f"Total time: {elapsed:.3f} s")
-    print(f"Jobs per second: {passed / elapsed:.2f}")
+    print(f"Jobs per second: {passed / elapsed:.2f}" if elapsed else "Jobs per second: n/a")
     print(f"Bytes moved: {bytes_moved}")
-    print(f"Effective throughput: {bytes_moved / elapsed:.2f} bytes/s")
+    print(
+        f"Effective throughput: {bytes_moved / elapsed:.2f} bytes/s"
+        if elapsed else "Effective throughput: n/a"
+    )
+    measured_jobs = passed + (1 if passed < jobs else 0)
+    if measured_jobs:
+        print(f"Average ser.write(): {write_time / measured_jobs:.6f} s")
+        print(f"Average ser.read(): {read_time / measured_jobs:.6f} s")
     print(f"UART limit: {baud / 10:.0f} bytes/s")
     return passed == jobs
 
@@ -162,12 +206,13 @@ def main():
     parser = argparse.ArgumentParser(description="Run serial tests")
     parser.add_argument("--mode", choices=("echo", "job", "run"), default="echo")
     parser.add_argument("--port", default="loop", help="serial port or 'loop'")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=1000000)
     parser.add_argument("--n", type=int, default=1000, help="number of bytes to send")
     parser.add_argument("--N", type=int, default=4, help="matrix dimension")
     parser.add_argument("--K", type=int, default=4, help="number of dot-product steps")
     parser.add_argument("--jobs", type=int, default=1000, help="number of jobs in run mode")
     parser.add_argument("--kmax", type=int, default=64, help="maximum K in run mode")
+    parser.add_argument("--prep", action="store_true", help="prepare all run-mode jobs before timing")
     parser.add_argument("--seed", type=int, default=1, help="random data seed")
     args = parser.parse_args()
 
@@ -198,7 +243,7 @@ def main():
             success = run_job(ser, A, B)
         else:
             rng = np.random.default_rng(args.seed)
-            success = run_jobs(ser, args.N, args.jobs, args.kmax, rng, args.baud)
+            success = run_jobs(ser, args.N, args.jobs, args.kmax, rng, args.baud, args.prep)
         if success:
             print(f"{args.mode.capitalize()} test passed.")
         else:
