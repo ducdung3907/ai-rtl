@@ -202,7 +202,26 @@ python host/run_jobs.py --mode run  --port fake                 # no board: soft
 
 **Expected throughput:** 1,000 jobs with K up to 64 move about 325 KB. At 115,200 baud the UART carries at most 11,520 bytes/s, so the run takes at least about 28 s (about 35 jobs/s), while the array computes each job in about a microsecond. The link, not the array, sets the speed.
 
-**Status:** verified in simulation end to end; hardware bring-up in progress.
+**Measured on the Wukong board** (N = 4, MAC_LAT = 2, 50 MHz, random jobs checked against NumPy):
+
+| Baud | Jobs | Result | Jobs/s | Throughput | Share of link limit |
+| --- | --- | --- | --- | --- | --- |
+| 115,200 | 1,000 (K ≤ 64) | 1000/1000 correct | 34.6 | 11,242 B/s | 97.6% |
+| 1,000,000 | 1,000 (K ≤ 64) | 1000/1000 correct | 236.3 | 76,809 B/s | 76.8% |
+| 1,000,000 | 100 (K ≤ 1000) | 100/100 correct | 21.2 | 88,535 B/s | 88.5% |
+| 2,000,000 | — | replies lose one byte near byte 35 | — | — | — |
+
+The array computes a job in about a microsecond; all of the time is data movement.
+
+- **Where the 1 Mbaud overhead goes:** about 9% is idle gaps the CH340 USB-UART bridge leaves in the
+  PC → FPGA stream (sending is ~10% slower than the ideal wire time), and about 0.6 ms per job is USB
+  round-trip latency on the reply. Host-side Python adds under 1% (preparing all jobs in advance
+  changed throughput by less than 1%).
+- **2 Mbaud:** the FPGA receives correctly, but continuous 2 Mbaud replies overflow the CH340's
+  internal buffer after about 32 bytes, so **1 Mbaud is the default**.
+- **Echo stream limit:** the CH340 runs ~0.3% fast, so a continuous echo of more than ~280 bytes
+  eventually drops a byte (the transmitter cannot outpace a faster sender forever). Request/reply
+  jobs are not affected.
 
 ## Synthesis results
 
