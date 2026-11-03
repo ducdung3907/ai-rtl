@@ -2,7 +2,7 @@
 
 module board_top #(
     parameter int CLK_HZ = 50_000_000,
-    parameter int BAUD = 115_200
+    parameter int BAUD = 1_000_000
 )(
     input  logic       sys_clk,
     input  logic       sys_rst_n,
