@@ -2,6 +2,7 @@ import argparse
 import struct
 import sys
 import time
+from collections import deque
 
 import numpy as np
 import serial
@@ -23,7 +24,6 @@ class FakeBoard:
         if len(data) != 3 + K * 2 * self.N:
             return len(data)
         if K == 0:
-            self.reply = b""
             return len(data)
 
         A = np.empty((self.N, K), dtype=np.int8)
@@ -35,7 +35,7 @@ class FakeBoard:
             B[k, :] = np.frombuffer(data[offset : offset + self.N], dtype=np.int8)
             offset += self.N
         C = A.astype(np.int32) @ B.astype(np.int32)
-        self.reply = C.astype("<i4").tobytes()
+        self.reply += C.astype("<i4").tobytes()      # replies queue up in order, like the board's
         return len(data)
 
     def read(self, n):
@@ -135,42 +135,53 @@ def run_job(ser, A, B):
     return True
 
 
-def run_jobs(ser, N, jobs, kmax, rng, baud, prep=False):
-    prepared = []
-    if prep:
-        for _ in range(jobs):
-            K = int(rng.integers(1, kmax + 1))
-            A, B = make_job(N, K, rng)
-            packet = build_job(A, B)
-            expected = A.astype(np.int32) @ B.astype(np.int32)
-            prepared.append((K, packet, expected))
+def run_jobs(ser, N, jobs, kmax, rng, baud, prep=False, window=1):
+    """Send jobs keeping up to `window` of them outstanding (window=1: one at a time).
 
+    window >= 2 needs the pipelined bitstream (sync_fifo + res_buf): the next request
+    is written while the board is still computing / sending the previous reply.
+    Replies come back in job order, so a FIFO of expected results is enough.
+    """
+    def new_job():
+        K = int(rng.integers(1, kmax + 1))
+        A, B = make_job(N, K, rng)
+        return K, build_job(A, B), A.astype(np.int32) @ B.astype(np.int32)
+
+    prepared = [new_job() for _ in range(jobs)] if prep else None
+
+    pending = deque()                       # (job_number, K, expected) written, reply not read yet
+    sent = 0
     passed = 0
     bytes_moved = 0
     write_time = 0.0
     read_time = 0.0
+    failed = False
     ser.reset_input_buffer()
     start = time.perf_counter()
     for job_number in range(1, jobs + 1):
-        if prep:
-            K, packet, expected = prepared[job_number - 1]
-        else:
-            K = int(rng.integers(1, kmax + 1))
-            A, B = make_job(N, K, rng)
-            packet = build_job(A, B)
-            expected = A.astype(np.int32) @ B.astype(np.int32)
+        # top up: keep `window` jobs in flight
+        while sent < jobs and sent < job_number - 1 + window:
+            K, packet, expected = prepared[sent] if prep else new_job()
+            write_start = time.perf_counter()
+            written = ser.write(packet)
+            write_time += time.perf_counter() - write_start
+            bytes_moved += len(packet)
+            sent += 1
+            pending.append((sent, K, expected))
+            if written != len(packet):
+                print(f"Job {sent} failed (K={K}): incomplete write")
+                failed = True
+                break
+        if failed:
+            break
 
-        write_start = time.perf_counter()
-        written = ser.write(packet)
-        write_time += time.perf_counter() - write_start
-
+        number, K, expected = pending.popleft()
         read_start = time.perf_counter()
         data = ser.read(4 * N * N)
         read_time += time.perf_counter() - read_start
-
-        bytes_moved += len(packet) + len(data)
-        if written != len(packet) or len(data) < 4 * N * N:
-            print(f"Job {job_number} failed (K={K}): incomplete write/read")
+        bytes_moved += len(data)
+        if len(data) < 4 * N * N:
+            print(f"Job {number} failed (K={K}): got {len(data)} of {4 * N * N} reply bytes")
             break
 
         result = parse_reply(data, N)
@@ -181,12 +192,12 @@ def run_jobs(ser, N, jobs, kmax, rng, baud, prep=False):
             print(expected)
             print("Mismatch indices (row, column):")
             print(np.argwhere(result != expected))
-            print(f"Job {job_number} failed (K={K})")
+            print(f"Job {number} failed (K={K})")
             break
         passed += 1
     elapsed = time.perf_counter() - start
 
-    print(f"passed {passed} / {jobs} jobs")
+    print(f"window {window}: passed {passed} / {jobs} jobs")
     print(f"Total time: {elapsed:.3f} s")
     print(f"Jobs per second: {passed / elapsed:.2f}" if elapsed else "Jobs per second: n/a")
     print(f"Bytes moved: {bytes_moved}")
@@ -194,10 +205,10 @@ def run_jobs(ser, N, jobs, kmax, rng, baud, prep=False):
         f"Effective throughput: {bytes_moved / elapsed:.2f} bytes/s"
         if elapsed else "Effective throughput: n/a"
     )
-    measured_jobs = passed + (1 if passed < jobs else 0)
-    if measured_jobs:
-        print(f"Average ser.write(): {write_time / measured_jobs:.6f} s")
-        print(f"Average ser.read(): {read_time / measured_jobs:.6f} s")
+    if passed:
+        # with window > 1 the write and read times overlap with the board's work
+        print(f"Average time blocked in ser.write(): {write_time / max(sent, 1):.6f} s")
+        print(f"Average time blocked in ser.read(): {read_time / passed:.6f} s")
     print(f"UART limit: {baud / 10:.0f} bytes/s")
     return passed == jobs
 
@@ -213,6 +224,8 @@ def main():
     parser.add_argument("--jobs", type=int, default=1000, help="number of jobs in run mode")
     parser.add_argument("--kmax", type=int, default=64, help="maximum K in run mode")
     parser.add_argument("--prep", action="store_true", help="prepare all run-mode jobs before timing")
+    parser.add_argument("--window", type=int, default=1,
+                        help="jobs kept in flight in run mode (1 = one at a time; >= 2 needs the pipelined bitstream)")
     parser.add_argument("--seed", type=int, default=1, help="random data seed")
     args = parser.parse_args()
 
@@ -220,6 +233,8 @@ def main():
         parser.error("--baud must be positive")
     if args.mode == "job" and (args.N <= 0 or args.K <= 0 or args.K > 65535):
         parser.error("job mode requires positive --N and --K, with --K <= 65535")
+    if args.window < 1:
+        parser.error("--window must be at least 1")
     if args.mode == "run" and (
         args.N <= 0 or args.jobs <= 0 or args.kmax <= 0 or args.kmax > 65535
     ):
@@ -243,7 +258,7 @@ def main():
             success = run_job(ser, A, B)
         else:
             rng = np.random.default_rng(args.seed)
-            success = run_jobs(ser, args.N, args.jobs, args.kmax, rng, args.baud, args.prep)
+            success = run_jobs(ser, args.N, args.jobs, args.kmax, rng, args.baud, args.prep, args.window)
         if success:
             print(f"{args.mode.capitalize()} test passed.")
         else:
