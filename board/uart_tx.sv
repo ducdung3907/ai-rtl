@@ -5,10 +5,10 @@ module uart_tx #(
     parameter int BAUD   = 115_200
 )(
     input  logic clk, rst_n,
-    input  logic [7:0] data,     
-    input  logic valid,    
-    output logic ready,    
-    output logic tx       
+    input  logic [7:0] data,
+    input  logic valid,
+    output logic ready,
+    output logic tx
 );
 
 typedef enum logic [1:0]{
@@ -50,7 +50,7 @@ always_ff @(posedge clk or negedge rst_n ) begin
             end else begin
                 baud_counter <= baud_counter + 1;
             end
-        end    
+        end
         if (valid && ready) begin
             data_cache <= data;
             baud_counter <= '0;
@@ -59,7 +59,7 @@ always_ff @(posedge clk or negedge rst_n ) begin
 end
 
 always_comb begin
-    next_state = state;  
+    next_state = state;
     next_tx = 1'b1;
     case (state)
         IDLE: begin
@@ -85,7 +85,7 @@ always_comb begin
             if (baud_counter == (CLKS_PER_BIT - 1)) begin
                 if (valid) next_state = START;
                 else next_state = IDLE;
-            end 
+            end
         end
         default: next_state = IDLE;
     endcase

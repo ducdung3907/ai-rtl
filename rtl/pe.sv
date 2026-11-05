@@ -13,7 +13,7 @@ module pe8 #(
     output logic signed [7:0] a_out, b_out,
 
     output logic clear_out,
-    
+
     output logic signed [31:0] acc
 );
 

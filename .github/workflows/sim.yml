@@ -21,6 +21,14 @@ jobs:
       - name: Run all testbenches
         run: ./sim/run_all.sh
 
+      - name: Host script on the software board model (no hardware)
+        run: |
+          pip install numpy pyserial
+          for w in 1 2 3; do
+            python host/run_jobs.py --mode run --port fake --jobs 200 --window $w
+          done
+          python host/manual.py --port fake > /dev/null
+
       - name: Upload logs (always, so failures can be inspected)
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 module skew #(
-    parameter N = 4
-)(  
+    parameter int N = 4
+)(
     input logic clk,
     input logic rst_n,
     input logic start_in,
@@ -33,7 +33,7 @@ generate
                 end
             end
         end
-        always_ff @(posedge clk) begin         
+        always_ff @(posedge clk) begin
             dcache[0] <= data_in[i];
             for (int j = 0; j < i-1; j = j+1) begin
                 dcache[j+1] <= dcache[j];

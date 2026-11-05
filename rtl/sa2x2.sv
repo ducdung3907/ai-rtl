@@ -9,7 +9,7 @@ module sa2x2 (
 
     output logic [3:0][31:0] acc
 );
-    
+
     logic [1:0] w_clr;
     logic [1:0][7:0] w_a,w_b;
     logic [1:0] w_av,w_bv;

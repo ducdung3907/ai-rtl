@@ -122,15 +122,17 @@ Forcing invalid products to zero collapses the four cases (load, clear, add, hol
 | [`rtl/sa_top.sv`](rtl/sa_top.sv) | `complete_sa` | Top level: two skew modules, the array and the `done` delay line |
 | [`board/uart_rx.sv`](board/uart_rx.sv) | `uart_rx` | 8N1 receiver: 2-flop synchroniser, mid-bit sampling, false-start and framing-error rejection, 1-clock `valid` |
 | [`board/uart_tx.sv`](board/uart_tx.sv) | `uart_tx` | 8N1 transmitter with valid/ready handshake; accepts the next byte in the last stop-bit clock, so frames follow with no gap |
-| [`board/sa_ctrl.sv`](board/sa_ctrl.sv) | `sa_ctrl` | Job controller: parses the host protocol, feeds `complete_sa` one step per K, snapshots `acc` on `done`, sends C back |
-| [`board/sa_board_top.sv`](board/sa_board_top.sv) | `sa_board_top` | Board top: reset synchroniser, UART, `sa_ctrl`, `complete_sa`, heartbeat and job LEDs |
+| [`board/sa_ctrl.sv`](board/sa_ctrl.sv) | `sa_ctrl` | Job controller (v2): reads request bytes from the FIFO, feeds `complete_sa` one step per K, hands the result to `res_buf` on `done` |
+| [`board/sync_fifo.sv`](board/sync_fifo.sv) | `sync_fifo` | First-word-fall-through byte FIFO between `uart_rx` and `sa_ctrl`, with a sticky overflow flag |
+| [`board/res_buf.sv`](board/res_buf.sv) | `res_buf` | Result buffer: captures `acc`, then streams the N×N int32 bytes to `uart_tx` while the next job already computes |
+| [`board/sa_board_top.sv`](board/sa_board_top.sv) | `sa_board_top` | Board top: reset synchroniser, UART, FIFO, `sa_ctrl`, `complete_sa`, `res_buf`, heartbeat and job LEDs (`led[0]` solid = FIFO overflow) |
 | [`board/board_top.sv`](board/board_top.sv) | `board_top` | Bring-up design: UART echo with a pending flag, heartbeat and byte LEDs |
 | [`board/wukong.xdc`](board/wukong.xdc), [`board/wukong_impl.xdc`](board/wukong_impl.xdc) | | Pin and clock constraints from the QMTECH Wukong V3 schematic (the second file is implementation-only) |
 | [`host/run_jobs.py`](host/run_jobs.py) | | Python host: echo test, single job, 1,000-job run with throughput report, and a software model of the board |
 
 ## Verification
 
-Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (26 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
+Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (33 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
 
 | Testbench | Covers | Result |
 | --- | --- | --- |
@@ -150,10 +152,10 @@ Each testbench was also checked against deliberately broken designs (wrong wirin
 
 ## Running the tests
 
-Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root, run everything (about 5 minutes):
+Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root, run everything (about 3 minutes on two cores; runs in parallel, `JOBS=1` for one at a time):
 
 ```bash
-./sim/run_all.sh            # all 26 runs, exits 1 if any fails
+./sim/run_all.sh            # all 33 runs, exits 1 if any fails
 ./sim/run_all.sh sa_ctrl    # only runs whose name contains "sa_ctrl"
 ```
 
@@ -182,12 +184,11 @@ vvp sim.vvp +seed=42
 ## On the board: UART host interface
 
 ```
-PC (Python) ──USB── CH340 ──uart_rx pin──> uart_rx ──> sa_ctrl ──> complete_sa
-            <─────────────────uart_tx pin── uart_tx <──    ^              │
-                                                           └── done, acc ─┘
+PC ──USB── CH340 ──> uart_rx ──> sync_fifo ──> sa_ctrl ──> complete_sa ──> res_buf ──> uart_tx ──> CH340 ──> PC
 ```
 
-**Protocol (PC → FPGA):** header `0xA5`, then K (number of steps, 2 bytes little-endian, 1 to 65,535; K = 0 means no job), then K steps of 2N bytes: column k of A followed by row k of B, signed int8. **Reply:** the N×N results row by row, each a little-endian int32 (64 bytes at N = 4). `sa_ctrl` takes the snapshot of `acc` on `done`, so the reply is correct even if a new job starts.
+
+**Protocol (PC → FPGA):** header `0xA5`, then K (number of steps, 2 bytes little-endian, 1 to 65,535; K = 0 means no job), then K steps of 2N bytes: column k of A followed by row k of B, signed int8. **Reply:** the N×N results row by row, each a little-endian int32 (64 bytes at N = 4). `res_buf` takes the snapshot of `acc` once the array is done, so the reply is correct even while the next request streams in.
 
 **Board:** QMTECH Wukong V3 (XC7A100T-1FGG676C, 50 MHz oscillator, CH340 USB-UART). Pins and the configuration-bank settings come from the V3 schematic; the 50 MHz clock arrives on a non-clock-capable pin, which `wukong_impl.xdc` allows. The echo design uses 79 LUTs and 86 flip-flops (matching a hand count of every register) and meets timing at 50 MHz with 15.7 ns of slack.
 
@@ -349,7 +350,8 @@ It sets `N` and `MAC_LAT` for each run (edit the lists at the top of the script)
 ```
 rtl/      array design files
 board/    UART, job controller, board tops and Wukong V3 constraints
-host/     Python host script
+host/     Python host scripts (run_jobs.py, manual.py, diag2m.py); `--port fake` runs without a board
+ml/       int8 MNIST MLP: training, quantisation, reference and on-board inference
 tb/       self-checking testbenches
 sim/      run_all.sh: every testbench across sizes and settings
 synth/    synthesis: Yosys/nextpnr script and harness, Vivado sweep script, timing constraint, results (CSV)
@@ -359,10 +361,10 @@ docs/     figures (Vivado schematic and placed design)
 
 ## Limitations and next steps
 
-- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by copying `acc` on `done` and waiting for the reply to finish before the next job; a separate output buffer would let compute and reply overlap.
+- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by handing `acc` to `res_buf` on `done` and waiting for `res_buf` to be free before the next job's result, so compute and reply overlap (host `--window 2` or more; hardware speed-up not yet measured).
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
 - **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
-- **On hardware:** the UART host path is complete in simulation; next is bring-up on the Wukong board, higher baud rates (1 and 2 Mbaud are exact at 50 MHz), then an int8-quantised MNIST network with weights held in block RAM.
+- **On hardware:** the pipelined path (v2) is verified in simulation; next is a Vivado build and a `--window 1/2/3` speed test on the board, then on-board int8 MNIST inference (`ml/board_infer.py`).
 - **UART speed:** a stream from a PC whose clock runs fast can eventually outrun the transmitter (a slower sender cannot keep up forever); jobs avoid it because the host waits for each reply. A small FIFO would cover long streams.
 
 ## AI use

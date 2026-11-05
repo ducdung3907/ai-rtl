@@ -1,5 +1,5 @@
 module systolic_array #(
-    parameter N = 4,
+    parameter int N = 4,
     parameter int MAC_LAT = 2
 )(
     input logic clk,
@@ -46,7 +46,7 @@ generate
             .acc(acc[i][j])
             );
         end
-    end 
+    end
 endgenerate
 
 endmodule
