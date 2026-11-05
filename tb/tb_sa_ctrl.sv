@@ -23,11 +23,11 @@
 //
 // Run:
 //   iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv rtl/skew.sv rtl/sa_top.sv \
-//       board/sync_fifo.sv board/res_buf.sv board/sa_ctrl.sv tb/tb_sa_ctrl_v2.sv -s tb_sa_ctrl_v2
+//       board/sync_fifo.sv board/res_buf.sv board/sa_ctrl.sv tb/tb_sa_ctrl.sv -s tb_sa_ctrl
 //   vvp sim.vvp
-//   iverilog ... -Ptb_sa_ctrl_v2.N=8 ...     vvp sim.vvp +seed=7
+//   iverilog ... -Ptb_sa_ctrl.N=8 ...     vvp sim.vvp +seed=7
  
-module tb_sa_ctrl_v2;
+module tb_sa_ctrl;
     parameter int N          = 4;
     parameter int MAC_LAT    = 2;
     parameter int FIFO_DEPTH = 16;     // small on purpose: the FIFO fills and full matters
@@ -189,7 +189,7 @@ module tb_sa_ctrl_v2;
     int seed;
     initial begin
         if (!$value$plusargs("seed=%d", seed)) seed = 1;
-        $display("tb_sa_ctrl_v2: N = %0d, MAC_LAT = %0d, FIFO_DEPTH = %0d, seed = %0d", N, MAC_LAT, FIFO_DEPTH, seed);
+        $display("tb_sa_ctrl: N = %0d, MAC_LAT = %0d, FIFO_DEPTH = %0d, seed = %0d", N, MAC_LAT, FIFO_DEPTH, seed);
         void'($urandom(seed));
  
         repeat (3) @(negedge clk);

@@ -15,11 +15,11 @@
 // Run:
 //   iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv rtl/skew.sv rtl/sa_top.sv \
 //       board/uart_rx.sv board/uart_tx.sv board/sync_fifo.sv board/res_buf.sv board/sa_ctrl.sv \
-//       board/sa_board_top.sv tb/tb_sa_board_top_v2.sv -s tb_sa_board_top_v2 && vvp sim.vvp
-//   iverilog ... -Ptb_sa_board_top_v2.WINDOW=1 ...         (no overlap, like v1)
-//   iverilog ... -Ptb_sa_board_top_v2.PC_SPEED=1.005 ...   (PC 0.5% fast)
+//       board/sa_board_top.sv tb/tb_sa_board_top.sv -s tb_sa_board_top && vvp sim.vvp
+//   iverilog ... -Ptb_sa_board_top.WINDOW=1 ...         (no overlap, like v1)
+//   iverilog ... -Ptb_sa_board_top.PC_SPEED=1.005 ...   (PC 0.5% fast)
  
-module tb_sa_board_top_v2;
+module tb_sa_board_top;
     parameter int  N        = 4;
     parameter int  MAC_LAT  = 2;
     parameter real PC_SPEED = 1.0;
@@ -123,7 +123,7 @@ module tb_sa_board_top_v2;
     realtime t0, t1;
     initial begin
         if (!$value$plusargs("seed=%d", seed)) seed = 1;
-        $display("tb_sa_board_top_v2: N = %0d, MAC_LAT = %0d, WINDOW = %0d, PC_SPEED = %0.3f, seed = %0d",
+        $display("tb_sa_board_top: N = %0d, MAC_LAT = %0d, WINDOW = %0d, PC_SPEED = %0.3f, seed = %0d",
                  N, MAC_LAT, WINDOW, PC_SPEED, seed);
         void'($urandom(seed));
  
