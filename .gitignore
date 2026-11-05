@@ -23,7 +23,8 @@ synth/build/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-model/vectors/          
+model/vectors/      
+ml/data
 
 # ---- Editors / OS ----
 .vscode/
