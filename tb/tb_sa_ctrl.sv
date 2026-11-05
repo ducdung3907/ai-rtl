@@ -1,144 +1,126 @@
 `timescale 1ns/1ps
-
-// Testbench for sa_ctrl + the real complete_sa (no UART: bytes are driven
-// directly as rx_data/rx_valid pulses, and replies are taken on tx_valid && tx_ready).
+ 
+// Testbench for the pipelined job path (no UART):
 //
-// Every job: the testbench builds random A (N x K) and B (K x N), sends
-//   0xA5, K low, K high, then K steps of (column k of A, row k of B),
-// with random idle cycles between bytes, then collects the 4*N*N reply bytes
-// while holding tx_ready low for random stretches, and compares C with A x B.
+//   bytes -> sync_fifo -> sa_ctrl (v2) -> complete_sa -> res_buf -> reply bytes
 //
-// Also checked on every job:
-//   - exactly K valid pulses; start only on the first, last only on the final
-//   - busy is 1 from the cycle after the header until the last reply byte
-//   - no reply bytes appear when no job was sent (junk, K = 0)
+// A producer pushes request bytes into the FIFO's write side (respecting full),
+// with random gaps or back to back. A consumer takes reply bytes from res_buf with
+// a random out_ready (fast or slow). Every reply byte is compared, in order, with
+// a queue of expected bytes built from A x B when the job was queued.
+//
+// Phases:
+//   1. directed jobs with gaps: K = 1, N, 7, 256
+//   2. random jobs back to back, fast consumer  (request of job n+1 overlaps reply n)
+//   3. random jobs back to back, slow consumer  (forces the HANDOFF stall)
+//   4. junk and K = 0 headers mixed between back-to-back jobs
+//
+// Also checked:
+//   - exactly one capture per job, job_done == capture
+//   - start only on the first step of a job, last only on step K
+//   - start/last never without valid
+//   - the FIFO never overflows; at the end everything is idle and empty
 //
 // Run:
 //   iverilog -g2012 -o sim.vvp rtl/mac.sv rtl/pe.sv rtl/saNxN.sv rtl/skew.sv rtl/sa_top.sv \
-//       board/sa_ctrl.sv tb/tb_sa_ctrl.sv && vvp sim.vvp
-//   iverilog ... -Ptb_sa_ctrl.N=8 ...      (other array size)
-//   vvp sim.vvp +seed=7
-
+//       board/sync_fifo.sv board/res_buf.sv board/sa_ctrl.sv tb/tb_sa_ctrl.sv -s tb_sa_ctrl
+//   vvp sim.vvp
+//   iverilog ... -Ptb_sa_ctrl.N=8 ...     vvp sim.vvp +seed=7
+ 
 module tb_sa_ctrl;
-    parameter int N       = 4;
-    parameter int MAC_LAT = 2;
-    parameter int N_RAND  = 20;     // random jobs after the directed ones
-
+    parameter int N          = 4;
+    parameter int MAC_LAT    = 2;
+    parameter int FIFO_DEPTH = 16;     // small on purpose: the FIFO fills and full matters
+    parameter int N_RAND     = 30;
+ 
+    localparam int MAX_K = 256;
+ 
     logic clk = 0, rst_n = 0;
-    logic [7:0] rx_data = 0;
-    logic       rx_valid = 0;
-    logic [7:0] tx_data;
-    logic       tx_valid, tx_ready = 0;
-    logic [N-1:0][7:0] a_col, b_row;
-    logic valid, start, last, done, busy;
-    logic [N-1:0][N-1:0][31:0] acc;
-
-    sa_ctrl #(.N(N)) dut (.*);
-    complete_sa #(.N(N), .MAC_LAT(MAC_LAT)) u_sa (
-        .clk(clk), .rst_n(rst_n), .a_col(a_col), .b_row(b_row),
-        .valid(valid), .start(start), .last(last), .done(done), .acc(acc)
-    );
-
     always #5 clk = ~clk;
-
-    int errors = 0, jobs_ok = 0;
-
+ 
+    // FIFO write side (driven by the producer)
+    logic       wr_valid = 0;
+    logic [7:0] wr_data  = 0;
+    logic       full, overflow;
+    logic [$clog2(FIFO_DEPTH+1)-1:0] count;
+ 
+    // FIFO -> sa_ctrl
+    logic       rd_valid, rd_ready;
+    logic [7:0] rd_data;
+ 
+    // sa_ctrl <-> complete_sa
+    logic [N-1:0][7:0] a_col, b_row;
+    logic valid, start, last, done;
+    logic [N-1:0][N-1:0][31:0] acc;
+ 
+    // sa_ctrl <-> res_buf
+    logic capture, res_busy, job_done, ctrl_busy;
+    logic [7:0] out_data;
+    logic out_valid, out_ready = 0;
+ 
+    sync_fifo #(.WIDTH(8), .DEPTH(FIFO_DEPTH)) u_fifo (.*);
+    sa_ctrl #(.N(N)) dut (.*);
+    complete_sa #(.N(N), .MAC_LAT(MAC_LAT)) u_sa (.*);
+    res_buf #(.N(N)) u_res (.*, .busy(res_busy));
+ 
+    int errors = 0;
     task automatic fail(input string msg);
         errors++;
         if (errors <= 15) $display("FAIL @%0t: %s", $time, msg);
     endtask
-
-    // ---------------- byte sender: one rx_valid pulse, then a random gap
-    int max_gap = 12;
-    task automatic send_byte(input logic [7:0] b);
-        @(negedge clk);
-        rx_data  = b;
-        rx_valid = 1;
-        @(negedge clk);
-        rx_valid = 0;
-        rx_data  = $urandom;            // data changes after the pulse, like uart_rx's next byte
-        repeat ($urandom_range(0, max_gap)) @(negedge clk);
-    endtask
-
-    // ---------------- reply collector: random tx_ready, stores bytes
-    logic [7:0] reply_q [$];
-    always @(negedge clk) tx_ready = ($urandom_range(0, 3) != 0);   // ready 75% of the time
-    always @(posedge clk) if (rst_n && tx_valid && tx_ready) reply_q.push_back(tx_data);
-
-    // ---------------- array-side monitor: count pulses within a job
-    int n_valid = 0, n_start = 0, n_last = 0;
-    int first_valid_had_start = 0, last_valid_had_last = 0, start_not_first = 0, last_not_final = 0;
-    always @(posedge clk) if (rst_n) begin
-        if ((start || last) && !valid) fail("start or last high without valid");
-        if (valid) begin
-            n_valid++;
-            if (start) begin
-                n_start++;
-                if (n_valid != 1) start_not_first++;
+ 
+    // ---------------- producer: send_q -> FIFO write side
+    logic [7:0] send_q [$];
+    int  gap_max = 0;          // 0 = back to back
+    int  gap_left = 0;
+    always @(negedge clk) begin
+        wr_valid = 0;
+        if (rst_n) begin
+            if (gap_left > 0) gap_left--;
+            else if (send_q.size() > 0 && !full) begin
+                wr_data  = send_q.pop_front();
+                wr_valid = 1;
+                gap_left = (gap_max > 0) ? $urandom_range(0, gap_max) : 0;
             end
-            if (last) n_last++;
         end
     end
-
-    // ---------------- reference model and one job
-    localparam int MAX_K = 256;
-    logic signed [7:0]  A [N][MAX_K];       // fixed size: Icarus has no 2D dynamic arrays
-    logic signed [7:0]  B [MAX_K][N];
-    logic signed [31:0] C [N][N];
-
-    task automatic run_job(input int K, input string label);
-        int got_idx;
-        int timeout;
-
-        for (int i = 0; i < N; i++) for (int k = 0; k < K; k++) A[i][k] = rv();
-        for (int k = 0; k < K; k++) for (int j = 0; j < N; j++) B[k][j] = rv();
-        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
-            C[i][j] = 0;
-            for (int k = 0; k < K; k++) C[i][j] += 32'($signed(A[i][k])) * 32'($signed(B[k][j]));
+ 
+    // ---------------- consumer: random out_ready, check every byte
+    logic [7:0] exp_q [$];
+    int ready_pct = 75;
+    int bytes_ok = 0;
+    always @(negedge clk) out_ready = ($urandom_range(0, 99) < ready_pct);
+    always @(posedge clk) if (rst_n && out_valid && out_ready) begin
+        if (exp_q.size() == 0) fail($sformatf("unexpected reply byte 0x%02h", out_data));
+        else begin
+            logic [7:0] e;
+            e = exp_q.pop_front();
+            if (out_data !== e) fail($sformatf("reply byte = 0x%02h, expected 0x%02h (%0d bytes ok so far)", out_data, e, bytes_ok));
+            else bytes_ok++;
         end
-
-        n_valid = 0; n_start = 0; n_last = 0; start_not_first = 0;
-        reply_q.delete();
-
-        send_byte(8'hA5);
-        send_byte(K[7:0]);
-        send_byte(K[15:8]);
-        for (int k = 0; k < K; k++) begin
-            for (int i = 0; i < N; i++) send_byte(A[i][k]);
-            for (int j = 0; j < N; j++) send_byte(B[k][j]);
-        end
-
-        // bytes arriving during compute/send must be ignored (not even a header)
-        send_byte(8'hA5); send_byte(8'h01); send_byte(8'h00);
-
-        timeout = 0;
-        while (reply_q.size() < 4*N*N && timeout < 20000) begin @(negedge clk); timeout++; end
-        repeat (20) @(negedge clk);
-
-        if (reply_q.size() != 4*N*N) begin
-            fail($sformatf("[%s] K=%0d: got %0d reply bytes, expected %0d (controller stuck?)", label, K, reply_q.size(), 4*N*N));
-            $display("FAIL: stopping: %0d errors, %0d jobs correct", errors, jobs_ok);
-            $finish;
-        end else begin
-            int bad = 0;
-            for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
-                logic [31:0] g;
-                got_idx = 4 * (i*N + j);
-                g = {reply_q[got_idx+3], reply_q[got_idx+2], reply_q[got_idx+1], reply_q[got_idx]};
-                if (g !== C[i][j]) begin
-                    bad++;
-                    if (bad <= 3) fail($sformatf("[%s] K=%0d: C[%0d][%0d] = %0d, expected %0d",
-                                                  label, K, i, j, $signed(g), C[i][j]));
-                end
+    end
+ 
+    // ---------------- array-side monitor
+    int k_q [$];               // K of each queued real job, in order
+    int step = 0, n_capture = 0, n_jobs = 0, stall_cycles = 0;
+    always @(posedge clk) if (rst_n) begin
+        if ((start || last) && !valid) fail("start or last without valid");
+        if (job_done !== capture) fail("job_done != capture");
+        if (capture) n_capture++;
+        if (dut.state == dut.HANDOFF && res_busy) stall_cycles++;
+        if (overflow) fail("FIFO overflow");
+        if (valid) begin
+            if (k_q.size() == 0) fail("valid with no job queued");
+            else begin
+                step++;
+                if (start !== (step == 1))       fail($sformatf("start=%b on step %0d", start, step));
+                if (last  !== (step == k_q[0]))  fail($sformatf("last=%b on step %0d of K=%0d", last, step, k_q[0]));
+                if (step == k_q[0]) begin void'(k_q.pop_front()); step = 0; end
             end
-            if (bad == 0) jobs_ok++;
         end
-        if (n_valid != K) fail($sformatf("[%s] K=%0d: %0d valid pulses", label, K, n_valid));
-        if (n_start != 1 || start_not_first) fail($sformatf("[%s] K=%0d: start count %0d (must be 1, on the first step)", label, K, n_start));
-        if (n_last  != 1) fail($sformatf("[%s] K=%0d: last count %0d (must be 1)", label, K, n_last));
-        if (busy) fail($sformatf("[%s] busy still high after the reply", label));
-    endtask
-
+    end
+ 
+    // ---------------- job builder
     function automatic logic signed [7:0] rv();
         case ($urandom_range(0, 9))
             0: return -128;
@@ -147,42 +129,107 @@ module tb_sa_ctrl;
             default: return $urandom;
         endcase
     endfunction
-
+ 
+    logic signed [7:0] A [N][MAX_K];
+    logic signed [7:0] B [MAX_K][N];
+ 
+    task automatic queue_job(input int K);
+        logic signed [31:0] c;
+        for (int i = 0; i < N; i++) for (int k = 0; k < K; k++) A[i][k] = rv();
+        for (int k = 0; k < K; k++) for (int j = 0; j < N; j++) B[k][j] = rv();
+        // expected reply: row-major, low byte first
+        for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) begin
+            c = 0;
+            for (int k = 0; k < K; k++) c += 32'($signed(A[i][k])) * 32'($signed(B[k][j]));
+            for (int b = 0; b < 4; b++) exp_q.push_back(c[8*b +: 8]);
+        end
+        k_q.push_back(K);
+        n_jobs++;
+        send_q.push_back(8'hA5);
+        send_q.push_back(K[7:0]);
+        send_q.push_back(K[15:8]);
+        for (int k = 0; k < K; k++) begin
+            for (int i = 0; i < N; i++) send_q.push_back(A[i][k]);
+            for (int j = 0; j < N; j++) send_q.push_back(B[k][j]);
+        end
+    endtask
+ 
+    task automatic queue_junk();
+        int n = $urandom_range(1, 4);
+        repeat (n) begin
+            logic [7:0] j;
+            do j = $urandom; while (j == 8'hA5);
+            send_q.push_back(j);
+        end
+    endtask
+ 
+    task automatic queue_k0();
+        send_q.push_back(8'hA5); send_q.push_back(8'h00); send_q.push_back(8'h00);
+    endtask
+ 
+    task automatic drain(input string label);
+        int t = 0;
+        while ((send_q.size() > 0 || exp_q.size() > 0 || ctrl_busy || res_busy) && t < 2_000_000) begin
+            @(negedge clk); t++;
+        end
+        repeat (20) @(negedge clk);
+        if (send_q.size() || exp_q.size() || ctrl_busy || res_busy)
+            fail($sformatf("[%s] stuck: %0d bytes unsent, %0d reply bytes missing, ctrl_busy=%b res_busy=%b",
+                           label, send_q.size(), exp_q.size(), ctrl_busy, res_busy));
+        else if (n_capture != n_jobs)
+            fail($sformatf("[%s] %0d captures for %0d jobs", label, n_capture, n_jobs));
+        else
+            $display("  %-34s ok: %0d jobs so far, %0d HANDOFF stall cycles", label, n_jobs, stall_cycles);
+        if (errors > 0) begin
+            $display("FAIL: stopping after phase [%s], %0d errors", label, errors);
+            $finish;
+        end
+    endtask
+ 
     int seed;
     initial begin
         if (!$value$plusargs("seed=%d", seed)) seed = 1;
-        $display("tb_sa_ctrl: N = %0d, MAC_LAT = %0d, seed = %0d", N, MAC_LAT, seed);
+        $display("tb_sa_ctrl: N = %0d, MAC_LAT = %0d, FIFO_DEPTH = %0d, seed = %0d", N, MAC_LAT, FIFO_DEPTH, seed);
         void'($urandom(seed));
-
+ 
         repeat (3) @(negedge clk);
         rst_n = 1;
         repeat (3) @(negedge clk);
-
-        // junk before a header: no reply, no busy
-        send_byte(8'h00); send_byte(8'hFF); send_byte(8'h5A); send_byte(8'h13);
-        repeat (50) @(negedge clk);
-        if (reply_q.size() != 0) fail("reply bytes after junk only");
-        if (busy) fail("busy high after junk only");
-
-        // K = 0: no job, back to waiting
-        reply_q.delete();
-        send_byte(8'hA5); send_byte(8'h00); send_byte(8'h00);
-        repeat (50) @(negedge clk);
-        if (reply_q.size() != 0) fail("reply bytes after a K = 0 job");
-        if (n_valid != 0)        fail("valid pulses after a K = 0 job");
-        if (busy)                fail("busy high after a K = 0 job");
-
-        run_job(1,   "K=1, start and last together");
-        run_job(N,   "K=N, square");
-        run_job(7,   "K=7");
-        run_job(256, "K=256, low byte 0");
-        max_gap = 0;
-        run_job(5,   "no gaps between bytes");
-        max_gap = 12;
-        for (int n = 0; n < N_RAND; n++) run_job($urandom_range(1, 40), "random");
-
-        if (errors == 0) $display("PASS: %0d jobs correct (N = %0d, MAC_LAT = %0d)", jobs_ok, N, MAC_LAT);
-        else             $display("FAIL: %0d errors, %0d jobs correct", errors, jobs_ok);
+ 
+        // 1. directed, with gaps
+        gap_max = 6; ready_pct = 75;
+        queue_junk(); drain("junk only (no reply)");
+        queue_k0();   drain("K = 0 (no reply)");
+        queue_job(1);   drain("K = 1");
+        queue_job(N);   drain("K = N");
+        queue_job(7);   drain("K = 7");
+        queue_job(256); drain("K = 256");
+ 
+        // 2. back to back, fast consumer
+        gap_max = 0; ready_pct = 100;
+        for (int n = 0; n < N_RAND; n++) queue_job($urandom_range(1, 12));
+        drain("back to back, fast consumer");
+ 
+        // 3. back to back, slow consumer -> HANDOFF stalls
+        ready_pct = 10;
+        for (int n = 0; n < N_RAND; n++) queue_job($urandom_range(1, 6));
+        drain("back to back, slow consumer");
+ 
+        // 4. junk and K = 0 between back-to-back jobs
+        ready_pct = 60;
+        for (int n = 0; n < N_RAND; n++) begin
+            case ($urandom_range(0, 3))
+                0: queue_junk();
+                1: queue_k0();
+                default: ;
+            endcase
+            queue_job($urandom_range(1, 20));
+        end
+        drain("mixed junk / K = 0 / jobs");
+ 
+        if (stall_cycles == 0) fail("HANDOFF stall never exercised");
+        if (errors == 0) $display("PASS: %0d jobs, %0d reply bytes checked (N = %0d, MAC_LAT = %0d)", n_jobs, bytes_ok, N, MAC_LAT);
+        else             $display("FAIL: %0d errors", errors);
         $finish;
     end
 endmodule
