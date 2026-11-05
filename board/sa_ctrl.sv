@@ -133,3 +133,5 @@ assign rd_ready = (state == IDLE) || (state == K_IN) || (state == DATA);
 assign capture = (state == HANDOFF) && !res_busy;
 assign job_done = capture;
 assign ctrl_busy = (state != IDLE);
+
+endmodule
