@@ -2,6 +2,7 @@
 # Run every testbench in tb/ (several N / MAC_LAT / PC speed settings) and
 # exit with an error if any of them fails. Used locally and by GitHub Actions.
 #
+# Runs in parallel (JOBS=n to change, default = CPU cores).
 # Usage (from the repository root):
 #   ./sim/run_all.sh            # everything
 #   ./sim/run_all.sh skew pe    # only runs whose name contains one of these words
@@ -47,51 +48,84 @@ RUNS=(
   "sa_ctrl_n2       | tb/tb_sa_ctrl.sv   | tb_sa_ctrl       | N=2"
   "sa_ctrl_n8       | tb/tb_sa_ctrl.sv   | tb_sa_ctrl       | N=8"
   "sa_board_top     | tb/tb_sa_board_top.sv  | tb_sa_board_top  | "
+  "sa_board_top_w1  | tb/tb_sa_board_top.sv  | tb_sa_board_top  | WINDOW=1"
+  "sa_board_top_fast| tb/tb_sa_board_top.sv  | tb_sa_board_top  | PC_SPEED=1.005"
+  "res_buf_n1       | tb/tb_res_buf.sv       | tb_res_buf       | N=1"
+  "res_buf_n2       | tb/tb_res_buf.sv       | tb_res_buf       | N=2"
+  "res_buf_n4       | tb/tb_res_buf.sv       | tb_res_buf       | N=4"
+  "res_buf_n8       | tb/tb_res_buf.sv       | tb_res_buf       | N=8"
+  "sync_fifo        | tb/tb_sync_fifo.sv     | tb_sync_fifo     | "
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
 
-pass=0; fail=0; skip=0; failed=()
-printf "%-18s %s\n" "run" "result"
-printf "%-18s %s\n" "---" "------"
+# Runs up to JOBS testbenches at once (default: number of CPU cores).
+#   JOBS=1 ./sim/run_all.sh     # one at a time, like before
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
-for entry in "${RUNS[@]}"; do
+# Compile and run one entry. Writes its one-line verdict to $LOGS/<name>.result
+# (PASS / FAIL / SKIP + text); the main loop prints them in list order afterwards.
+run_one() {
+    local entry="$1" name file top params
     IFS='|' read -r name file top params <<< "$entry"
     name=$(trim "$name"); file=$(trim "$file"); top=$(trim "$top"); params=$(trim "$params")
-
-    # Optional filter from the command line
-    if [ $# -gt 0 ]; then
-        keep=0; for w in "$@"; do [[ "$name" == *"$w"* ]] && keep=1; done
-        [ $keep -eq 0 ] && continue
-    fi
+    local res="$LOGS/$name.result"
 
     # Skip testbenches that don't exist on this branch yet
     if [ ! -f "$file" ]; then
-        printf "%-18s %s\n" "$name" "skip (no $file)"; skip=$((skip+1)); continue
+        echo "SKIP skip (no $file)" > "$res"; return
     fi
 
     # Skip a parameter override the testbench doesn't have (e.g. an older version)
-    pflags=""; missing=""
+    local pflags="" missing="" p pname
     for p in $params; do
         pname="${p%%=*}"
         if grep -qE "parameter[^;]*\b${pname}\b" "$file"; then pflags="$pflags -P${top}.${p}"
         else missing="$pname"; fi
     done
     if [ -n "$missing" ]; then
-        printf "%-18s %s\n" "$name" "skip ($file has no $missing)"; skip=$((skip+1)); continue
+        echo "SKIP skip ($file has no $missing)" > "$res"; return
     fi
 
-    log="$LOGS/$name.log"
-    vvp_file="$LOGS/$name.vvp"
+    local log="$LOGS/$name.log" vvp_file="$LOGS/$name.vvp"
     if ! iverilog -g2012 -s "$top" $pflags -o "$vvp_file" $DESIGN "$file" > "$log" 2>&1; then
-        printf "%-18s %s\n" "$name" "FAIL (compile, see $log)"; fail=$((fail+1)); failed+=("$name"); continue
+        echo "FAIL FAIL (compile, see $log)" > "$res"; return
     fi
     timeout 900 vvp -n "$vvp_file" >> "$log" 2>&1
     if grep -q "^PASS" "$log" && ! grep -q "^FAIL" "$log"; then
-        printf "%-18s %s\n" "$name" "PASS  $(grep -m1 '^PASS' "$log" | cut -c1-60)"; pass=$((pass+1))
+        echo "PASS PASS  $(grep -m1 '^PASS' "$log" | cut -c1-60)" > "$res"
     else
-        printf "%-18s %s\n" "$name" "FAIL (see $log)"; fail=$((fail+1)); failed+=("$name")
+        echo "FAIL FAIL (see $log)" > "$res"
     fi
+}
+
+# Pick the runs (optional name filter from the command line), start them
+selected=()
+for entry in "${RUNS[@]}"; do
+    IFS='|' read -r name _ <<< "$entry"; name=$(trim "$name")
+    if [ $# -gt 0 ]; then
+        keep=0; for w in "$@"; do [[ "$name" == *"$w"* ]] && keep=1; done
+        [ $keep -eq 0 ] && continue
+    fi
+    rm -f "$LOGS/$name.result"
+    selected+=("$name|$entry")
+    run_one "$entry" &
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+done
+wait
+
+pass=0; fail=0; skip=0; failed=()
+printf "%-18s %s\n" "run" "result"
+printf "%-18s %s\n" "---" "------"
+for item in "${selected[@]}"; do
+    name="${item%%|*}"
+    read -r kind text < "$LOGS/$name.result"
+    printf "%-18s %s\n" "$name" "$text"
+    case "$kind" in
+        PASS) pass=$((pass+1)) ;;
+        SKIP) skip=$((skip+1)) ;;
+        *)    fail=$((fail+1)); failed+=("$name") ;;
+    esac
 done
 
 echo

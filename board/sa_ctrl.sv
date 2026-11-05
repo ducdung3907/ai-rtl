@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
- 
+
 module sa_ctrl #(
     parameter int N = 4
 )(
@@ -23,14 +23,14 @@ module sa_ctrl #(
     output logic job_done,
     output logic ctrl_busy
 );
- 
+
 localparam int CW = (N > 1) ? $clog2(N) : 1;
 logic [1:0] k_counter;
 logic [CW-1:0] counter;
 logic [1:0][7:0] k_cache;
 logic a_or_b;
 logic [15:0] step_counter;
- 
+
 typedef enum logic [2:0] {
     IDLE,
     K_IN,
@@ -38,9 +38,9 @@ typedef enum logic [2:0] {
     WAIT_DONE,
     HANDOFF
 }state_t;
- 
+
 state_t state, next_state;
- 
+
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         counter <= '0;
@@ -67,7 +67,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             end
             K_IN: begin
                 if (rd_valid && rd_ready) begin
-                    k_cache[k_counter] <= rd_data; 
+                    k_cache[k_counter] <= rd_data;
                     k_counter <= k_counter + 1;
                 end
             end
@@ -75,7 +75,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                 if (rd_valid && rd_ready) begin
                     if (!a_or_b) begin
                         a_col[counter] <= rd_data;
-                    end else begin 
+                    end else begin
                         b_row[counter] <= rd_data;
                     end
                     if (counter == (N-1)) begin
@@ -96,7 +96,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         endcase
     end
 end
- 
+
 always_comb begin
     next_state = state;
     case(state)
@@ -128,7 +128,7 @@ always_comb begin
         default: next_state = IDLE;
     endcase
 end
- 
+
 assign rd_ready = (state == IDLE) || (state == K_IN) || (state == DATA);
 assign capture = (state == HANDOFF) && !res_busy;
 assign job_done = capture;

@@ -100,7 +100,7 @@ end
                     end else begin
                         next_state = IDLE;
                     end
-                end 
+                end
             end
             DATA: begin
                 if ((baud_counter == (CLKS_PER_BIT - 1))&&(bit_index==7)) begin

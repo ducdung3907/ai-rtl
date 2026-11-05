@@ -18,13 +18,14 @@ synth/build/
 
 # ---- Logs ----
 *.log
+sim/logs/
 
 # ---- Python (reference models) ----
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-model/vectors/      
-ml/data
+model/vectors/
+ml/data/
 
 # ---- Editors / OS ----
 .vscode/

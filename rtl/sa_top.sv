@@ -1,5 +1,5 @@
 module complete_sa #(
-    parameter N = 4,
+    parameter int N = 4,
     parameter int MAC_LAT = 2
 )(
     input logic clk,
@@ -48,7 +48,7 @@ systolic_array #(.N(N),.MAC_LAT(MAC_LAT)) base_sa (
     .acc(acc)
 );
 
-localparam int LAT = 2*(N-1) + MAC_LAT; 
+localparam int LAT = 2*(N-1) + MAC_LAT;
 
 logic [LAT-1:0] done_cache;
 

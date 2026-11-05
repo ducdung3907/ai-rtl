@@ -59,8 +59,8 @@ always_ff @(posedge clk or negedge rst_n) begin
             end
         end
         case ({wr_fire, rd_fire})
-            2'b10: count <= count + 1'b1; 
-            2'b01: count <= count - 1'b1; 
+            2'b10: count <= count + 1'b1;
+            2'b01: count <= count - 1'b1;
             default: count <= count;
         endcase
     end
