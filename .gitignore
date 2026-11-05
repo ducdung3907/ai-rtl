@@ -37,3 +37,8 @@ desktop.ini
 
 #env
 .venv/
+<<<<<<< Updated upstream
+=======
+
+*.patch
+>>>>>>> Stashed changes
