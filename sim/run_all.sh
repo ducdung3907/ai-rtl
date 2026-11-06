@@ -56,6 +56,8 @@ RUNS=(
   "res_buf_n8       | tb/tb_res_buf.sv       | tb_res_buf       | N=8"
   "sync_fifo        | tb/tb_sync_fifo.sv     | tb_sync_fifo     | "
   "requant          | tb/tb_requant.sv       | tb_requant       | "
+  "argmax_w10       | tb/tb_argmax.sv        | tb_argmax        | WIDTH=10"
+  "argmax_w4        | tb/tb_argmax.sv        | tb_argmax        | WIDTH=4"
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
