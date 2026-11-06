@@ -1,6 +1,6 @@
 module simple_dp_ram #(
     parameter int WIDTH = 32,
-    parameter int DEPTH = 1024,
+    parameter int DEPTH = 1024
 )(
     input logic clk,
     
