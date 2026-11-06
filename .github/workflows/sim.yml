@@ -14,6 +14,8 @@ jobs:
 
       - name: Install OSS CAD Suite
         uses: YosysHQ/setup-oss-cad-suite@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Show tool version
         run: iverilog -V 2>&1 | head -1
