@@ -58,6 +58,7 @@ RUNS=(
   "requant          | tb/tb_requant.sv       | tb_requant       | "
   "argmax_w10       | tb/tb_argmax.sv        | tb_argmax        | WIDTH=10"
   "argmax_w4        | tb/tb_argmax.sv        | tb_argmax        | WIDTH=4"
+  "weight_rom       | tb/tb_weight_rom.sv    | tb_weight_rom    | "
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
