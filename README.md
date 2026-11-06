@@ -224,6 +224,23 @@ The array computes a job in about a microsecond; all of the time is data movemen
   eventually drops a byte (the transmitter cannot outpace a faster sender forever). Request/reply
   jobs are not affected.
 
+### Pipelined v2 on the board
+
+The v2 bitstream (UART → FIFO → controller → array → result buffer → UART) built in Vivado 2025.2 for `xc7a100tfgg676-1` at 50 MHz: 681 LUTs, 192 LUTRAM, 936 flip-flops, 16 DSPs, WNS +11.730 ns, WHS +0.049 ns, 0.111 W (estimated). Same random jobs as above, N = 4, 1 Mbaud, every result checked against NumPy; `--window W` keeps W jobs in flight:
+
+| Run | Jobs | Result | Jobs/s | Throughput |
+| --- | --- | --- | --- | --- |
+| window 1, K ≤ 64 | 1,000 | 1000/1000 correct | 236.6 | 76,900 B/s |
+| window 2, K ≤ 64 | 1,000 | 1000/1000 correct | 330.3 (+40%) | 107,354 B/s |
+| window 3, K ≤ 64 | 1,000 | 1000/1000 correct | 336.4 (+42%) | 109,359 B/s |
+| window 2, K ≤ 1000 | 100 | 100/100 correct | 21.55 | 89,978 B/s |
+
+- **The overlap works:** with window ≥ 2 the next request streams in while the previous reply goes out, so the combined rate passes the 100 KB/s single-direction limit (UART is full duplex).
+- **What limits it now:** the PC → FPGA direction. A job averages 261 request bytes, so at most about 383 jobs/s; window 3 reaches about 88% of that. The remainder is the idle time the CH340 leaves between bytes.
+- **Large K gains little:** a K = 500 job is about 4 KB in and 64 bytes out, so there is almost no reply to hide.
+- **Window 1 is unchanged from v1** (236.6 vs 236.3 jobs/s), so the extra FIFO and buffer cost nothing when unused.
+- **On-chip MNIST:** [`ml/`](ml/) runs an int8 MLP with all multiply-accumulates on the array; 1,000 validation images are bit-exact against the integer reference.
+
 ## Synthesis results
 
 The same RTL was synthesised, placed and routed for two FPGAs with two toolflows: **AMD Artix-7** with **Vivado**, and **Lattice ECP5** with the open-source **sv2v + Yosys + nextpnr** flow. Max clock comes from static timing analysis after place and route. Peak throughput = 2 operations (multiply + add) × N² PEs × max clock.
@@ -364,7 +381,7 @@ docs/     figures (Vivado schematic and placed design)
 - **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by handing `acc` to `res_buf` on `done` and waiting for `res_buf` to be free before the next job's result, so compute and reply overlap (host `--window 2` or more; hardware speed-up not yet measured).
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
 - **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
-- **On hardware:** the pipelined path (v2) is verified in simulation; next is a Vivado build and a `--window 1/2/3` speed test on the board, then on-board int8 MNIST inference (`ml/board_infer.py`).
+- **On hardware:** the pipelined path (v2) is verified in simulation and on the board; next steps are `requant`, `argmax` and row-per-cycle result units, then a whole layer on the FPGA.
 - **UART speed:** a stream from a PC whose clock runs fast can eventually outrun the transmitter (a slower sender cannot keep up forever); jobs avoid it because the host waits for each reply. A small FIFO would cover long streams.
 
 ## AI use
