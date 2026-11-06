@@ -58,6 +58,8 @@ RUNS=(
   "requant          | tb/tb_requant.sv       | tb_requant       | "
   "argmax_w10       | tb/tb_argmax.sv        | tb_argmax        | WIDTH=10"
   "argmax_w4        | tb/tb_argmax.sv        | tb_argmax        | WIDTH=4"
+  "dp_ram_784       | tb/tb_simple_dp_ram.sv | tb_simple_dp_ram | DEPTH=784"
+  "dp_ram_64        | tb/tb_simple_dp_ram.sv | tb_simple_dp_ram | DEPTH=64"
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
