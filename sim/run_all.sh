@@ -61,6 +61,7 @@ RUNS=(
   "dp_ram_784       | tb/tb_simple_dp_ram.sv | tb_simple_dp_ram | DEPTH=784"
   "dp_ram_64        | tb/tb_simple_dp_ram.sv | tb_simple_dp_ram | DEPTH=64"
   "weight_rom       | tb/tb_weight_rom.sv    | tb_weight_rom    | "
+  "infer_core       | tb/tb_infer_core.sv    | tb_infer_core    | "
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
@@ -94,7 +95,7 @@ run_one() {
     fi
 
     local log="$LOGS/$name.log" vvp_file="$LOGS/$name.vvp"
-    if ! iverilog -g2012 -s "$top" $pflags -o "$vvp_file" $DESIGN "$file" > "$log" 2>&1; then
+    if ! iverilog -g2012 -I ml/mem -s "$top" $pflags -o "$vvp_file" $DESIGN "$file" > "$log" 2>&1; then
         echo "FAIL FAIL (compile, see $log)" > "$res"; return
     fi
     timeout 900 vvp -n "$vvp_file" >> "$log" 2>&1
