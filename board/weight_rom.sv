@@ -1,7 +1,7 @@
 module weight_rom #(
     parameter int WIDTH = 32,
     parameter int DEPTH = 12736,
-    parameter string INIT_FILE = "weights.mem"
+    parameter INIT_FILE = "weights.mem"
 )(
     input  logic clk,
     input  logic [$clog2(DEPTH)-1:0] addr,
