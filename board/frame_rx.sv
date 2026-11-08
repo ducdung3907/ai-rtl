@@ -49,7 +49,8 @@ module frame_rx #(
             ram_we <= 0;
             if (rx_valid && rx_data[7] && state != IDLE) begin
                 frame_abort <= 1;
-                state <= (rx_data == START) ? SEQ : IDLE;
+                if (rx_data == START) state <= SEQ;
+                else                  state <= IDLE;
                 sum <= '0; step <= '0; byte_index <= '0;
             end else case (state)
                 IDLE: begin
