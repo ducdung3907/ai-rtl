@@ -3,3 +3,4 @@ torch
 torchvision
 matplotlib>=3.8
 pyserial
+pillow

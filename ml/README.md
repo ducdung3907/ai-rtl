@@ -29,6 +29,7 @@ python ml/gen_mem.py                                  # ml/mem/*.mem + model_par
 python ml/board_infer.py --onchip --n 100             # v3 on the software board model
 python ml/board_infer.py --onchip --port COM6 --n 1000   # v3 on the board, 1,000 validation images
 python ml/board_infer.py --onchip --port COM6 --test     # v3 on the board, all 10,000 test images
+python ml/draw_demo.py --port COM6                      # draw a digit with the mouse, the board reads it
 ```
 
 ## Quantisation
