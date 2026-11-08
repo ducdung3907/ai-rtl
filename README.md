@@ -11,7 +11,7 @@ On an AMD Artix-7 the pipelined array holds **above 220 MHz up to N = 15** (225 
 The array runs on an **FPGA board** (QMTech Wukong V3, XC7A100T) in two designs:
 
 - **v2, matrix-multiply server:** a PC sends A and B over USB-UART and gets C back. Measured on the board: every result correct, up to 336 jobs/s with jobs overlapped, and an int8 MNIST network bit-exact on 1,000 images with all its multiply-accumulates on the array.
-- **v3, the whole network on the chip:** the weights live in block RAM and the FPGA runs both layers, bias, requantisation, ReLU and argmax; the PC sends 4 images and gets 4 digits back. Verified in simulation from the UART pins to the digits; hardware results: TBD.
+- **v3, the whole network on the chip:** the weights live in block RAM and the FPGA runs both layers, bias, requantisation, ReLU and argmax; the PC sends 4 images and gets 4 digits back. Measured on the board: 8.9 ms per image (33× faster than v2), every digit identical to the integer reference, 97.20% on the 10,000 test images.
 
 All 44 testbench runs execute on every push through GitHub Actions.
 
@@ -285,17 +285,46 @@ flowchart LR
 
 **Weights.** [`ml/gen_mem.py`](ml/gen_mem.py) turns `mlp_64_int8.npz` into `ml/mem/weights.mem`, `bias1.mem`, `bias2.mem` and `model_params.svh` (M, shift, tile counts). In Vivado, add those four files to the project (the `.svh` as a Verilog Header).
 
-**Vivado (`infer_board_top`, xc7a100tfgg676-1, 50 MHz):** TBD LUTs, TBD LUTRAM, TBD flip-flops, TBD DSPs, TBD block RAM tiles, WNS TBD ns, WHS TBD ns, TBD W (estimated).
+**Vivado 2025.2 (`infer_board_top`, xc7a100tfgg676-1, 50 MHz):** 780 LUTs (all logic, no LUTRAM; v2 used 192 for its FIFO), 852 flip-flops, 24 DSPs (16 for the array, 2 per requant lane), 17.5 block RAM tiles (about 13 of them the weight ROM), WNS +12.256 ns, WHS +0.035 ns, 0.124 W (estimated). The design fills about 1% of the chip.
+
+| Block | LUTs | Flip-flops | Block RAM | DSPs |
+| --- | --- | --- | --- | --- |
+| `infer_core` (controller, array, requant, argmax, memories) | 627 | 634 | 17.5 | 24 |
+| `frame_rx` | 44 | 104 | 0 | 0 |
+| UARTs, `reply_tx`, LEDs, reset | 109 | 114 | 0 | 0 |
+| **Total** | **780** | **852** | **17.5** | **24** |
+
+![Placed v3 design on the XC7A100T: everything sits in one corner of the chip](docs/vivado_v3_device.png)
 
 **Measured on the board** (`python ml/board_infer.py --onchip --port COM6`):
 
 | Run | Images | Digits equal to `ref_infer` | Accuracy | ms per image | Images/s |
 | --- | --- | --- | --- | --- | --- |
-| validation | 1,000 | TBD | TBD | TBD | TBD |
-| test | 10,000 | TBD | TBD | TBD | TBD |
+| validation | 1,000 | 1,000 of 1,000 | 97.60% | 8.91 | 112.3 |
+| test | 10,000 | 10,000 of 10,000 | 97.20% | 8.90 | 112.4 |
 
-- **Speed-up over v2:** TBD× (294 ms per image in v2). Expected about 8 ms per image: a frame is 3,139 bytes, about 31 ms at 1 Mbaud, against 0.26 ms of compute, so the UART still sets the speed.
+- **Speed-up over v2:** 33× (294 ms per image in v2). 2,750 frames ran with no checksum errors or retries.
 - **Traffic:** about 785 bytes per image in and 1.5 out, against 25.8 KB per image in v2.
+- **The UART still sets the speed.** A frame is 3,139 bytes, so 1 Mbaud allows at best 31.4 ms per frame (7.85 ms per image). Measured: 35.6 ms per frame, 88% of that limit. The rest is the idle gaps the CH340 leaves between bytes (about 3 ms) and the USB round trip of each reply (about 1 ms); the FPGA computes a frame in 0.26 ms.
+- **Against a PC:** the same network in NumPy takes about 46 µs per image (integer maths) or 1.5 µs (float32 BLAS), batched, on a 2-core cloud machine. The FPGA computes in 65 µs per image with 16 PEs at 50 MHz, using about 1% of the chip; the link, not the array, makes it slower end to end.
+
+```
+$ python ml/board_infer.py --onchip --port COM6 --n 1000
+1000 images in 8.91 s: 8.91 ms/image, 112.3 images/s (250 frames, 0 retries)
+UART: 784750 bytes out, 1500 bytes in (785 + 1.5 bytes/image)
+board accuracy on these 1000 images: 97.60%
+all 1000 digits identical to ref_infer
+
+$ python ml/board_infer.py --onchip --port COM6 --test
+10000 images in 88.97 s: 8.90 ms/image, 112.4 images/s (2500 frames, 0 retries)
+UART: 7847500 bytes out, 15000 bytes in (785 + 1.5 bytes/image)
+board accuracy on these 10000 images: 97.20%
+all 10000 digits identical to ref_infer
+```
+
+**Drawing demo.** [`ml/draw_demo.py`](ml/draw_demo.py) lets you draw a digit with the mouse; it is turned into a 28×28 MNIST-style image and sent to the board as a frame, and the board's digit is shown next to the PC's reference scores (one answer in about 35 ms). The board and the PC agreed on every drawing; the model itself misreads some hand-drawn styles, since it is a small MLP trained only on MNIST. In the screenshot, a 9 with a curled loop is read as 3 by both.
+
+![Drawing demo on the board: a curled 9 read as 3, the same answer as the PC's reference, 35 ms round trip](docs/v3_demo.png)
 
 ## Synthesis results
 
@@ -429,7 +458,7 @@ ml/mem/   weights and biases as .mem files for the v3 ROMs (generated by ml/gen_
 tb/       self-checking testbenches; tb/vectors/ holds generated test vectors
 sim/      run_all.sh: every testbench across sizes and settings
 synth/    synthesis: Yosys/nextpnr script and harness, Vivado sweep script, timing constraint, results (CSV)
-docs/     figures (Vivado schematic and placed design)
+docs/     figures (Vivado schematic, placed designs for the array sweep and v3, the drawing demo)
 .github/  GitHub Actions workflow running sim/run_all.sh
 ```
 
@@ -439,6 +468,7 @@ docs/     figures (Vivado schematic and placed design)
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
 - **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
 - **v3 is limited by the UART:** compute is about 1% of the time per frame. Next steps are a faster link (higher baud, then Ethernet), then double-buffered input so the next frame arrives while the current one computes, then a larger array.
+- **Hand-drawn digits:** the 784 → 64 → 10 MLP reaches 97.2% on MNIST but misreads some mouse-drawn digits. Training with augmentation (shifts, rotations, stroke width) or a larger hidden layer would help without changing the RTL.
 - **v3 is fixed to this network and N = 4:** the 4-byte word packing assumes N = 4 (the word is 8×N bits), and the layer sizes come from `model_params.svh`.
 - **UART speed:** a stream from a PC whose clock runs fast can eventually outrun the transmitter (a slower sender cannot keep up forever); jobs avoid it because the host waits for each reply. A small FIFO would cover long streams.
 
@@ -448,7 +478,7 @@ docs/     figures (Vivado schematic and placed design)
 - **Board RTL:** `uart_rx`, `uart_tx`, `board_top`, `sa_board_top` and `sa_ctrl` were written by me (for `sa_ctrl` from a state-machine template), with Claude reviewing each version and pointing out bugs. The Wukong pin constraints were taken from the QMTECH V3 schematic with Claude.
 - **Testbenches:** `tb_mac`, `tb_skew` and `tb_pe` were written by me, and review by Claude. The others (`tb_sa2x2`, `tb_asNxN`, `tb_sa_top` and the UART, board and controller testbenches) were generated with Claude and run against my designs; I am rewriting them one by one.
 - **v3 RTL:** `frame_rx`, `infer_core`, `reply_tx`, `infer_board_top`, `requant`, `argmax`, `simple_dp_ram` and `weight_rom` were written by me. Claude reviewed each version and pointed out where it was wrong, and I fixed and reimplemented it until it passed the testbenches.
-- **v3 testbenches and tools:** all v3 testbenches, `tb/gen_requant_vectors.py`, `tb/gen_infer_vectors.py`, `ml/gen_mem.py`, `host/infer_frame.py` with its tests, and `board_infer.py --onchip` were written by Claude.
+- **v3 testbenches and tools:** all v3 testbenches, `tb/gen_requant_vectors.py`, `tb/gen_infer_vectors.py`, `ml/gen_mem.py`, `host/infer_frame.py` with its tests, `board_infer.py --onchip` and the drawing demo `ml/draw_demo.py` were written by Claude.
 - **Host and CI:** `host/run_jobs.py` was written by me with Claude reviewing it. `sim/run_all.sh` and the GitHub Actions workflow were written by Claude.
 - **Synthesis:** the Yosys/nextpnr script, the measurement harness and the Vivado sweep script in `synth/` were written by Claude. The Vivado runs were set up and run by me.
 - **Documentation:** this README was drafted with Claude.

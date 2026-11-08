@@ -44,14 +44,14 @@ python ml/draw_demo.py --port COM6                      # draw a digit with the 
 
 ## Results
 
-Validation set = the last 5,000 training images (used for every choice); the test set was used once, for the float model.
+Validation set = the last 5,000 training images (used for every choice); the test set was only used to report final results (float model, int8 reference, v3 on the board), never to choose anything.
 
 | Model | Validation | Test |
 | --- | --- | --- |
 | float32 (PyTorch) | 97.62% | 97.26% |
 | int8 reference (`ref_infer.py`) | 97.64% | 97.20% |
 | int8 on the board, v2 (first 1,000 validation images) | 97.60% | â€“ |
-| int8 on the board, v3 (first 1,000 validation / all 10,000 test images) | TBD | TBD |
+| int8 on the board, v3 (first 1,000 validation / all 10,000 test images) | 97.60% | 97.20% |
 
 **On the board (v2):** 1,000 images, all 10,000 logits **bit-identical** to `ref_infer.py` (so board accuracy is exactly the reference accuracy).
 
@@ -65,12 +65,12 @@ Time is set by the UART link, not by the array. Cost per batch of 4 images is `â
 so the first layer dominates. A batch of one image costs the same as a full batch (1.17 s measured), which is why
 `--n 1` looks slow.
 
-**On the board (v3, `--onchip`):** TBD of 1,000 digits identical to `ref_infer.py`.
+**On the board (v3, `--onchip`):** all 1,000 validation and 10,000 test digits identical to `ref_infer.py`.
 
 | | v2 | v3 |
 | --- | --- | --- |
-| Time per image | 294 ms | TBD |
+| Time per image | 294 ms | 8.9 ms |
 | UART traffic per image | 25.8 KB | about 0.79 KB (3,139 bytes in and 6 out per 4 images) |
 | What the host does | tiling, bias, requant, argmax | builds frames, checks the digits |
 
-v3 is still set by the UART: a frame takes about 31 ms at 1 Mbaud, the FPGA computes it in 0.26 ms.
+v3 is still set by the UART: a frame needs at least 31.4 ms at 1 Mbaud (35.6 ms measured), the FPGA computes it in 0.26 ms.
