@@ -8,7 +8,12 @@ You feed plain matrices one column of A and one row of B per cycle; the hardware
 
 On an AMD Artix-7 the pipelined array holds **above 220 MHz up to N = 15** (225 PEs, about **99 GOPS** peak) while using **under 150 LUTs**, compared with 114 MHz and 33,371 LUTs for the single-cycle version at N = 16. Everything is verified in simulation for N = 2 to 8 with random data, varying matrix lengths, idle cycles in the input stream and back-to-back matrices, for both MAC designs.
 
-The array also has a **host interface for an FPGA board** (QMTech Wukong V3, XC7A100T): a UART receiver and transmitter, a job controller and a Python host script, so a PC can send A and B over USB and get C back. The whole path is verified in simulation, from bits on the UART pin to the 32-bit results; bring-up on the physical board is next. All 26 testbench runs execute on every push through GitHub Actions.
+The array runs on an **FPGA board** (QMTech Wukong V3, XC7A100T) in two designs:
+
+- **v2, matrix-multiply server:** a PC sends A and B over USB-UART and gets C back. Measured on the board: every result correct, up to 336 jobs/s with jobs overlapped, and an int8 MNIST network bit-exact on 1,000 images with all its multiply-accumulates on the array.
+- **v3, the whole network on the chip:** the weights live in block RAM and the FPGA runs both layers, bias, requantisation, ReLU and argmax; the PC sends 4 images and gets 4 digits back. Verified in simulation from the UART pins to the digits; hardware results: TBD.
+
+All 44 testbench runs execute on every push through GitHub Actions.
 
 ## Block diagram
 
@@ -126,13 +131,22 @@ Forcing invalid products to zero collapses the four cases (load, clear, add, hol
 | [`board/sync_fifo.sv`](board/sync_fifo.sv) | `sync_fifo` | First-word-fall-through byte FIFO between `uart_rx` and `sa_ctrl`, with a sticky overflow flag |
 | [`board/res_buf.sv`](board/res_buf.sv) | `res_buf` | Result buffer: captures `acc`, then streams the N×N int32 bytes to `uart_tx` while the next job already computes |
 | [`board/sa_board_top.sv`](board/sa_board_top.sv) | `sa_board_top` | Board top: reset synchroniser, UART, FIFO, `sa_ctrl`, `complete_sa`, `res_buf`, heartbeat and job LEDs (`led[0]` solid = FIFO overflow) |
+| [`board/frame_rx.sv`](board/frame_rx.sv) | `frame_rx` | v3 frame parser: START, seq, 3,136 pixel bytes, checksum; writes 4 bytes per word into the input RAM, pulses `frame_ok` / `frame_err`, resyncs on any top-bit byte |
+| [`board/infer_core.sv`](board/infer_core.sv) | `infer_core` | v3 controller and datapath: input, hidden and weight memories, `complete_sa`, 4 requant lanes, 4 argmax units; runs both layers tile by tile |
+| [`board/requant.sv`](board/requant.sv) | `requant` | Bias add, fixed-point scale (`× M >> shift`, rounded) and clip to 0..127 (the ReLU); 3-stage pipeline |
+| [`board/argmax.sv`](board/argmax.sv) | `argmax` | Index of the largest of `WIDTH` values streamed one per cycle; the first maximum wins a tie |
+| [`board/simple_dp_ram.sv`](board/simple_dp_ram.sv) | `simple_dp_ram` | One write port and one read port, 1-cycle read (block RAM) |
+| [`board/weight_rom.sv`](board/weight_rom.sv) | `weight_rom` | Block-RAM ROM loaded from a `.mem` file (weights, biases) |
+| [`board/reply_tx.sv`](board/reply_tx.sv) | `reply_tx` | v3 reply: `[A6][seq][4 digits]` or `[E6][seq]` on a checksum error, one byte at a time to `uart_tx` |
+| [`board/infer_board_top.sv`](board/infer_board_top.sv) | `infer_board_top` | v3 board top: `uart_rx → frame_rx → infer_core → reply_tx → uart_tx`; same pins as `sa_board_top` |
 | [`board/board_top.sv`](board/board_top.sv) | `board_top` | Bring-up design: UART echo with a pending flag, heartbeat and byte LEDs |
 | [`board/wukong.xdc`](board/wukong.xdc), [`board/wukong_impl.xdc`](board/wukong_impl.xdc) | | Pin and clock constraints from the QMTECH Wukong V3 schematic (the second file is implementation-only) |
 | [`host/run_jobs.py`](host/run_jobs.py) | | Python host: echo test, single job, 1,000-job run with throughput report, and a software model of the board |
+| [`host/infer_frame.py`](host/infer_frame.py) | | v3 frame protocol: builds frames, parses replies, and a byte-level software model of the board (`FakeInferBoard`) |
 
 ## Verification
 
-Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (33 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
+Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (44 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
 
 | Testbench | Covers | Result |
 | --- | --- | --- |
@@ -147,15 +161,22 @@ Every testbench is self-checking: it computes the expected result with a referen
 | [`tb/tb_board_top.sv`](tb/tb_board_top.sv) | Echo through the pins, continuous streams with the PC 0.5% fast and slow, LEDs | PASS (53 bytes each) |
 | [`tb/tb_sa_ctrl.sv`](tb/tb_sa_ctrl.sv) | Controller with the real `complete_sa`: K = 0, 1, N, 7, 256 and random, junk before the header, `tx_ready` backpressure, bytes during compute ignored | PASS at N = 2, 4, 8 for MAC_LAT = 1 and 2 (25 jobs each) |
 | [`tb/tb_sa_board_top.sv`](tb/tb_sa_board_top.sv) | Whole board path: a PC model sends jobs bit by bit into the `uart_rx` pin and checks C from the `uart_tx` pin | PASS (12 jobs; also at PC baud ±0.5%) |
+| [`tb/tb_requant.sv`](tb/tb_requant.sv) | 5,614 vectors from [`tb/gen_requant_vectors.py`](tb/gen_requant_vectors.py): rounding, negative sums (ReLU), saturation, back to back | PASS |
+| [`tb/tb_argmax.sv`](tb/tb_argmax.sv) | Directed, random, ties (first maximum), gaps, junk while `in_valid` is low; exact 1-cycle timing | PASS for WIDTH = 10 and 4 (1,510 vectors) |
+| [`tb/tb_simple_dp_ram.sv`](tb/tb_simple_dp_ram.sv), [`tb/tb_weight_rom.sv`](tb/tb_weight_rom.sv) | 1-cycle read, read-first on a same-address write, write enable; ROM contents against `ml/mem/weights.mem` | PASS |
+| [`tb/tb_frame_rx.sv`](tb/tb_frame_rx.sv) | Good frames, bad checksums (every checksum bit), dropped and extra bytes, stray START, truncated frames, 60 fuzzed frames | PASS at N_STEPS = 784 and 16 |
+| [`tb/tb_infer_core.sv`](tb/tb_infer_core.sv) | 15 batches (60 images) from [`tb/gen_infer_vectors.py`](tb/gen_infer_vectors.py): digits, all 64 hidden words, `done_seq`, one `done` pulse, `busy`, a second `start` ignored | PASS (12,991 cycles per batch) |
+| [`tb/tb_reply_tx.sv`](tb/tb_reply_tx.sv) | Random done/error events, both at once, events during a reply, `tx_ready` 100/50/10% | PASS |
+| [`tb/tb_infer_board_top.sv`](tb/tb_infer_board_top.sv) | v3 through the UART pins: junk, good frames, bad checksum, cut frames, seq 0 and 127, LEDs | PASS (6 replies) |
 
 Each testbench was also checked against deliberately broken designs (wrong wiring, missing reset, misaligned valid, clear not travelling with the data, `done` one cycle late, and for the pipelined MAC: using `clear` instead of `clear1`, a stuck valid, a product register without reset) to make sure it catches real bugs.
 
 ## Running the tests
 
-Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root, run everything (about 3 minutes on two cores; runs in parallel, `JOBS=1` for one at a time):
+Requires [Icarus Verilog](https://steveicarus.github.io/iverilog/) 12 or newer. From the repository root, run everything (runs in parallel, `JOBS=1` for one at a time; the two v3 system runs take about 1 and 4 minutes on their own):
 
 ```bash
-./sim/run_all.sh            # all 33 runs, exits 1 if any fails
+./sim/run_all.sh            # all 44 runs, exits 1 if any fails
 ./sim/run_all.sh sa_ctrl    # only runs whose name contains "sa_ctrl"
 ```
 
@@ -240,6 +261,41 @@ The v2 bitstream (UART → FIFO → controller → array → result buffer → U
 - **Large K gains little:** a K = 500 job is about 4 KB in and 64 bytes out, so there is almost no reply to hide.
 - **Window 1 is unchanged from v1** (236.6 vs 236.3 jobs/s), so the extra FIFO and buffer cost nothing when unused.
 - **On-chip MNIST:** [`ml/`](ml/) runs an int8 MLP with all multiply-accumulates on the array; 1,000 validation images are bit-exact against the integer reference.
+
+### v3: the whole network on the FPGA
+
+In v2 the weights crossed the UART on every job and the PC did everything except the multiplies (294 ms per image). v3 keeps the weights in block RAM and runs the whole 784 → 64 → 10 network on the chip. The PC sends 4 images and reads back 4 digits.
+
+```mermaid
+flowchart LR
+    RX["uart_rx"] --> FR["frame_rx<br/>parse, checksum"]
+    FR --> IN["input RAM<br/>784 × 32"]
+    IN --> MUX{"a_col mux"}
+    HID["hidden RAM<br/>64 × 32"] -- "pass 2" --> MUX
+    ROM["weight ROM<br/>12,736 × 32"] --> SA["complete_sa<br/>4×4 array"]
+    MUX --> SA
+    SA -- "pass 1" --> RQ["+bias1, requant ×4<br/>(ReLU)"] --> HID
+    SA -- "pass 2" --> AM["+bias2, argmax ×4"] --> RP["reply_tx"] --> TX["uart_tx"]
+    FR -- "frame_err" --> RP
+```
+
+**How it works.** One array runs both layers. A tile is 4 neurons (the array's 4 columns) for 4 images (its 4 rows): layer 1 is 16 tiles of 784 steps, layer 2 is 3 tiles of 64 steps (10 outputs padded to 12; the 2 padding neurons never reach the argmax). After each tile, the epilogue adds the bias to one column per cycle and either requantises it into the hidden RAM (layer 1) or feeds it to the argmax units (layer 2). Pass 2 reads the hidden RAM exactly the way pass 1 reads the input RAM. Every memory word holds 4 int8 values, one per image or one per weight column, so one read feeds all 4 lanes. One batch takes 12,991 cycles (0.26 ms at 50 MHz).
+
+**Protocol.** PC → FPGA: `[0xA6][seq][3,136 pixel bytes][checksum]`, pixels 0..127 in step order (pixel k of images 0..3, then pixel k + 1), checksum = sum of the pixel bytes mod 128. FPGA → PC: `[0xA6][seq][d0][d1][d2][d3]`, or `[0xE6][seq]` on a checksum error. Only START has its top bit set, so a dropped or extra byte abandons that frame and the next START resyncs. The host waits for each reply before the next frame (layer 1 re-reads the input RAM on every tile).
+
+**Weights.** [`ml/gen_mem.py`](ml/gen_mem.py) turns `mlp_64_int8.npz` into `ml/mem/weights.mem`, `bias1.mem`, `bias2.mem` and `model_params.svh` (M, shift, tile counts). In Vivado, add those four files to the project (the `.svh` as a Verilog Header).
+
+**Vivado (`infer_board_top`, xc7a100tfgg676-1, 50 MHz):** TBD LUTs, TBD LUTRAM, TBD flip-flops, TBD DSPs, TBD block RAM tiles, WNS TBD ns, WHS TBD ns, TBD W (estimated).
+
+**Measured on the board** (`python ml/board_infer.py --onchip --port COM6`):
+
+| Run | Images | Digits equal to `ref_infer` | Accuracy | ms per image | Images/s |
+| --- | --- | --- | --- | --- | --- |
+| validation | 1,000 | TBD | TBD | TBD | TBD |
+| test | 10,000 | TBD | TBD | TBD | TBD |
+
+- **Speed-up over v2:** TBD× (294 ms per image in v2). Expected about 8 ms per image: a frame is 3,139 bytes, about 31 ms at 1 Mbaud, against 0.26 ms of compute, so the UART still sets the speed.
+- **Traffic:** about 785 bytes per image in and 1.5 out, against 25.8 KB per image in v2.
 
 ## Synthesis results
 
@@ -366,10 +422,11 @@ It sets `N` and `MAC_LAT` for each run (edit the lists at the top of the script)
 
 ```
 rtl/      array design files
-board/    UART, job controller, board tops and Wukong V3 constraints
+board/    UART, v2 job controller, v3 inference core, board tops and Wukong V3 constraints
 host/     Python host scripts (run_jobs.py, manual.py, diag2m.py); `--port fake` runs without a board
-ml/       int8 MNIST MLP: training, quantisation, reference and on-board inference
-tb/       self-checking testbenches
+ml/       int8 MNIST MLP: training, quantisation, reference and on-board inference (v2 and v3)
+ml/mem/   weights and biases as .mem files for the v3 ROMs (generated by ml/gen_mem.py)
+tb/       self-checking testbenches; tb/vectors/ holds generated test vectors
 sim/      run_all.sh: every testbench across sizes and settings
 synth/    synthesis: Yosys/nextpnr script and harness, Vivado sweep script, timing constraint, results (CSV)
 docs/     figures (Vivado schematic and placed design)
@@ -378,10 +435,11 @@ docs/     figures (Vivado schematic and placed design)
 
 ## Limitations and next steps
 
-- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by handing `acc` to `res_buf` on `done` and waiting for `res_buf` to be free before the next job's result, so compute and reply overlap (host `--window 2` or more; hardware speed-up not yet measured).
+- **Results are only all present between matrices.** In back-to-back streaming, early PEs start the next matrix before the last PE finishes, so `done` assumes a gap before the next `start`. `sa_ctrl` handles this by handing `acc` to `res_buf` on `done` and waiting for `res_buf` to be free before the next job's result, so compute and reply overlap (host `--window 2` or more; measured +42% on the board at window 3).
 - **N² × 32 output wires.** Fine for small N, impractical for large arrays. Next step: shift results out one row per cycle.
 - **Large-N clock:** the pipelined array still slows from 297 to 221 MHz between N = 2 and N = 15, from a path not yet identified. Instantiating the DSP48E1 directly with its internal OPMODE register is a further option.
-- **On hardware:** the pipelined path (v2) is verified in simulation and on the board; next steps are `requant`, `argmax` and row-per-cycle result units, then a whole layer on the FPGA.
+- **v3 is limited by the UART:** compute is about 1% of the time per frame. Next steps are a faster link (higher baud, then Ethernet), then double-buffered input so the next frame arrives while the current one computes, then a larger array.
+- **v3 is fixed to this network and N = 4:** the 4-byte word packing assumes N = 4 (the word is 8×N bits), and the layer sizes come from `model_params.svh`.
 - **UART speed:** a stream from a PC whose clock runs fast can eventually outrun the transmitter (a slower sender cannot keep up forever); jobs avoid it because the host waits for each reply. A small FIFO would cover long streams.
 
 ## AI use
@@ -389,6 +447,8 @@ docs/     figures (Vivado schematic and placed design)
 - **Design (RTL):** all design files in `rtl/` were written by me. Claude reviewed them, explained concepts and pointed out bugs, which I then fixed. The OPMODE fix (zeroing invalid products) and the `keep` attribute came out of analysing the Vivado timing reports with Claude; I implemented both.
 - **Board RTL:** `uart_rx`, `uart_tx`, `board_top`, `sa_board_top` and `sa_ctrl` were written by me (for `sa_ctrl` from a state-machine template), with Claude reviewing each version and pointing out bugs. The Wukong pin constraints were taken from the QMTECH V3 schematic with Claude.
 - **Testbenches:** `tb_mac`, `tb_skew` and `tb_pe` were written by me, and review by Claude. The others (`tb_sa2x2`, `tb_asNxN`, `tb_sa_top` and the UART, board and controller testbenches) were generated with Claude and run against my designs; I am rewriting them one by one.
+- **v3 RTL:** `frame_rx`, `infer_core`, `reply_tx`, `infer_board_top`, `requant`, `argmax`, `simple_dp_ram` and `weight_rom` were written by me. Claude reviewed each version and pointed out where it was wrong, and I fixed and reimplemented it until it passed the testbenches.
+- **v3 testbenches and tools:** all v3 testbenches, `tb/gen_requant_vectors.py`, `tb/gen_infer_vectors.py`, `ml/gen_mem.py`, `host/infer_frame.py` with its tests, and `board_infer.py --onchip` were written by Claude.
 - **Host and CI:** `host/run_jobs.py` was written by me with Claude reviewing it. `sim/run_all.sh` and the GitHub Actions workflow were written by Claude.
 - **Synthesis:** the Yosys/nextpnr script, the measurement harness and the Vivado sweep script in `synth/` were written by Claude. The Vivado runs were set up and run by me.
 - **Documentation:** this README was drafted with Claude.

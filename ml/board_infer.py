@@ -1,10 +1,21 @@
-"""Run the int8 MNIST pipeline with the two matrix multiplies on the FPGA.
+"""Run the int8 MNIST network on the FPGA.
 
-  python board_infer.py --check --n 20                   # FakeBoard: tests the host tiling, no hardware
-  python board_infer.py --port COM3 --check --n 100      # the real board
+Two board designs:
 
-The pipeline is ref_infer.predict(); only the matmul differs. With --check the logits
-from the board path must equal the plain-numpy logits exactly (integer maths is exact).
+  v2 (sa_board_top, default): the board only does the matrix multiplies; the host tiles, adds the biases,
+  requantises and takes the argmax. Every tile is one job over the UART.
+    python board_infer.py --check --n 20                    # FakeBoard: tests the host tiling, no hardware
+    python board_infer.py --port COM6 --check --n 100       # the real board
+
+  v3 (infer_board_top, --onchip): the weights live in block RAM and the board runs the whole network.
+  The host sends frames of 4 images (host/infer_frame.py) and reads back 4 digits, one frame at a time
+  (stop and wait: the next frame goes out only after the reply to the previous one).
+    python board_infer.py --onchip --n 100                  # FakeInferBoard, no hardware
+    python board_infer.py --onchip --port COM6 --n 1000     # the real board
+    python board_infer.py --onchip --port COM6 --test       # all 10,000 test images
+
+v2 --check: the logits must equal the plain-numpy logits exactly (integer maths is exact).
+v3: the digits are always compared with ref_infer; every one must match.
 """
 import argparse
 import sys
@@ -15,9 +26,11 @@ import numpy as np
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "host"))
 from run_jobs import build_job, open_port, parse_reply       # one copy of the UART protocol
+from infer_frame import N_IMG, OK_REPLY_LEN, FakeInferBoard, ReplyError, build_frame
+from infer_frame import parse_reply as parse_frame_reply
 
 import data
-from ref_infer import load_model, predict
+from ref_infer import load_model, predict, quantize_pixels, requant
 
 N = 4                                                         # the array is N x N
 
@@ -54,18 +67,103 @@ def make_board_matmul(ser, stats):
     return matmul
 
 
+def digits_from_q(q, x_q):
+    """Integer model on pixels that are already 0..127 (what the board receives). Returns the digits."""
+    acc1 = x_q.astype(np.int64) @ q["W1_q"].astype(np.int64) + q["b1_q"]
+    a1 = requant(acc1, q["M1"], q["shift1"]).astype(np.int64)
+    acc2 = a1 @ q["W2_q"].astype(np.int64) + q["b2_q"]
+    return acc2.argmax(axis=1)
+
+
+def run_onchip(ser, x_q, retries=3, log=print):
+    """Send x_q (n, 784, values 0..127) to an infer_board_top, 4 images per frame, stop and wait.
+
+    Returns (digits (n,), stats). A checksum error, a timeout or a reply with the wrong seq is
+    retried with a fresh seq after clearing the input buffer, up to `retries` times per frame.
+    """
+    n = len(x_q)
+    digits = np.zeros(n, dtype=np.int64)
+    stats = {"frames": 0, "retries": 0, "bytes_out": 0, "bytes_in": 0}   # bytes_in: good replies only
+    seq = 0
+    ser.reset_input_buffer()
+    for b in range(0, n, N_IMG):
+        chunk = x_q[b:b + N_IMG]
+        for attempt in range(retries + 1):
+            frame = build_frame(chunk, seq)
+            ser.write(frame)
+            stats["bytes_out"] += len(frame)
+            try:
+                got = parse_frame_reply(ser.read, seq, n_images=len(chunk))
+                stats["bytes_in"] += OK_REPLY_LEN
+                break
+            except ReplyError as e:
+                stats["retries"] += 1
+                log(f"frame {b // N_IMG} (seq {seq}): {e}; " + ("retrying" if attempt < retries else "giving up"))
+                ser.reset_input_buffer()
+                if attempt == retries:
+                    raise
+            finally:
+                seq = (seq + 1) & 0x7F
+        digits[b:b + len(chunk)] = got
+        stats["frames"] += 1
+    return digits, stats
+
+
+def main_onchip(args, q, pixels, labels):
+    x_q = quantize_pixels(pixels)
+    ref = digits_from_q(q, x_q)
+    ref_pred, _ = predict(q, pixels)                  # the same model through ref_infer's own path
+    assert np.array_equal(ref, ref_pred), "digits_from_q disagrees with ref_infer.predict"
+
+    if args.port == "fake":
+        ser = FakeInferBoard(lambda imgs: digits_from_q(q, imgs.astype(np.int64)))
+    else:
+        ser = open_port(args.port, args.baud, args.timeout, N)
+    t0 = time.perf_counter()
+    try:
+        got, st = run_onchip(ser, x_q, retries=args.retries)
+    finally:
+        ser.close()
+    dt = time.perf_counter() - t0
+
+    n = len(x_q)
+    print(f"{n} images in {dt:.2f} s: {1000 * dt / n:.2f} ms/image, {n / dt:.1f} images/s "
+          f"({st['frames']} frames, {st['retries']} retries)")
+    print(f"UART: {st['bytes_out']} bytes out, {st['bytes_in']} bytes in "
+          f"({st['bytes_out'] / n:.0f} + {st['bytes_in'] / n:.1f} bytes/image)")
+    print(f"board accuracy on these {n} images: {np.mean(got == labels):.2%}")
+    bad = np.flatnonzero(got != ref)
+    if len(bad):
+        i = bad[0]
+        print(f"MISMATCH: {len(bad)} of {n} digits differ from ref_infer; first: image {i}, "
+              f"board {got[i]} vs reference {ref[i]}")
+        sys.exit(1)
+    print(f"all {n} digits identical to ref_infer")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="fake", help="COM3, /dev/ttyUSB0, or fake (default)")
     ap.add_argument("--baud", type=int, default=1_000_000)
     ap.add_argument("--timeout", type=float, default=2.0)
-    ap.add_argument("--n", type=int, default=20, help="number of validation images")
-    ap.add_argument("--check", action="store_true", help="compare logits with plain numpy (must be identical)")
+    ap.add_argument("--n", type=int, default=20, help="number of images (default 20)")
+    ap.add_argument("--test", action="store_true", help="use the test set (all 10,000 unless --n is given)")
+    ap.add_argument("--check", action="store_true", help="v2: compare logits with plain numpy (must be identical)")
+    ap.add_argument("--onchip", action="store_true", help="v3 board (infer_board_top): whole network on the FPGA")
+    ap.add_argument("--retries", type=int, default=3, help="v3: resends per frame after an error (default 3)")
     args = ap.parse_args()
 
     q = load_model()
-    X, Y, _, _ = data.load_mnist(raw=True)
-    pixels, labels = X[-5000:][:args.n], Y[-5000:][:args.n]
+    X, Y, X_test, Y_test = data.load_mnist(raw=True)
+    if args.test:
+        n = args.n if any(a.startswith("--n") for a in sys.argv[1:]) else len(X_test)
+        pixels, labels = X_test[:n], Y_test[:n]
+    else:
+        pixels, labels = X[-5000:][:args.n], Y[-5000:][:args.n]
+
+    if args.onchip:
+        main_onchip(args, q, pixels, labels)
+        sys.exit(0)
 
     ser = open_port(args.port, args.baud, args.timeout, N)
     stats = {"jobs": 0, "bytes": 0}
