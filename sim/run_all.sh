@@ -62,6 +62,10 @@ RUNS=(
   "dp_ram_64        | tb/tb_simple_dp_ram.sv | tb_simple_dp_ram | DEPTH=64"
   "weight_rom       | tb/tb_weight_rom.sv    | tb_weight_rom    | "
   "infer_core       | tb/tb_infer_core.sv    | tb_infer_core    | "
+  "frame_rx_n784    | tb/tb_frame_rx.sv        | tb_frame_rx        | N_STEPS=784"
+  "frame_rx_n16     | tb/tb_frame_rx.sv        | tb_frame_rx        | N_STEPS=16"
+  "reply_tx         | tb/tb_reply_tx.sv        | tb_reply_tx        | "
+  "infer_board_top  | tb/tb_infer_board_top.sv | tb_infer_board_top | "
 )
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }

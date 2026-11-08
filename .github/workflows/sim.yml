@@ -26,6 +26,7 @@ jobs:
       - name: Host script on the software board model (no hardware)
         run: |
           pip install numpy pyserial
+          python host/test_infer_frame.py
           for w in 1 2 3; do
             python host/run_jobs.py --mode run --port fake --jobs 200 --window $w
           done
