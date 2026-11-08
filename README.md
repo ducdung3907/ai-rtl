@@ -146,7 +146,7 @@ Forcing invalid products to zero collapses the four cases (load, clear, add, hol
 
 ## Verification
 
-Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (44 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog (12 and the OSS CAD Suite build):
+Every testbench is self-checking: it computes the expected result with a reference model in the testbench and prints PASS or FAIL. `sim/run_all.sh` runs all of them across sizes and settings (44 runs) and fails if any run fails; GitHub Actions runs it on every push. Results with Icarus Verilog 12 (local and CI); also checked with 14.0 devel:
 
 | Testbench | Covers | Result |
 | --- | --- | --- |
@@ -458,6 +458,6 @@ docs/     figures (Vivado schematic and placed design)
 - SystemVerilog (IEEE 1800-2012)
 - Icarus Verilog 12 for simulation
 - sv2v, Yosys and nextpnr for open-source synthesis and place and route (Lattice ECP5)
-- AMD Vivado 2026.1 for synthesis and implementation (Artix-7)
+- AMD Vivado 2025.2 (board builds) and 2026.1 (synthesis sweeps) (Artix-7)
 - Python 3 with NumPy and pyserial for the host script
-- GitHub Actions with OSS CAD Suite for continuous integration
+- GitHub Actions (Icarus Verilog 12 from Ubuntu) for continuous integration
